@@ -203,25 +203,35 @@ export default function Chat() {
     const formData = new FormData();
     formData.append("image", file);
 
-    // show temporary analyzing message
-    append({
-      role: "assistant",
-      content: "📸 Analyzing image…",
-    });
+    // temporary analyzing message
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: Date.now(),
+        role: "assistant",
+        content: "📸 Analyzing image…",
+      }
+    ]);
 
     const res = await fetch("/api/chat", {
       method: "POST",
-      body: formData,
+      body: formData
     });
 
     const data = await res.json();
 
-    append({
-      role: "assistant",
-      content: data.response,
-    });
+    // final output
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: Date.now(),
+        role: "assistant",
+        content: data.response,
+      }
+    ]);
   }}
 />
+
 
                     
                 <FieldGroup>
