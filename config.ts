@@ -1,7 +1,16 @@
 import { openai } from "@ai-sdk/openai";
+import { fireworks } from "@ai-sdk/fireworks";
 import { wrapLanguageModel, extractReasoningMiddleware } from "ai";
 
 export const MODEL = openai('gpt-4.1');
+
+// If you want to use a Fireworks model, uncomment the following code and set the FIREWORKS_API_KEY in Vercel
+// NOTE: Use middleware when the reasoning tag is different than think. (Use ChatGPT to help you understand the middleware)
+// export const MODEL = wrapLanguageModel({
+//     model: fireworks('fireworks/deepseek-r1-0528'),
+//     middleware: extractReasoningMiddleware({ tagName: 'think' }), // Use this only when using Deepseek
+// });
+
 
 function getDateAndTime(): string {
     const now = new Date();
