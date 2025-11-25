@@ -192,6 +192,8 @@ export default function Chat() {
             <div className="max-w-3xl w-full">
               <form id="chat-form" onSubmit={form.handleSubmit(onSubmit)}>
                  <input
+  
+    <input
   type="file"
   accept="image/*"
   capture="environment"
@@ -207,15 +209,20 @@ export default function Chat() {
     setMessages((prev) => [
       ...prev,
       {
-        id: Date.now(),
+        id: `temp-${Date.now()}`,
         role: "assistant",
-        content: "📸 Analyzing image…",
-      }
+        parts: [
+          {
+            type: "text",
+            text: "📸 Analyzing image…",
+          },
+        ],
+      },
     ]);
 
     const res = await fetch("/api/chat", {
       method: "POST",
-      body: formData
+      body: formData,
     });
 
     const data = await res.json();
@@ -224,10 +231,15 @@ export default function Chat() {
     setMessages((prev) => [
       ...prev,
       {
-        id: Date.now(),
+        id: `img-${Date.now()}`,
         role: "assistant",
-        content: data.response,
-      }
+        parts: [
+          {
+            type: "text",
+            text: data.response,
+          },
+        ],
+      },
     ]);
   }}
 />
