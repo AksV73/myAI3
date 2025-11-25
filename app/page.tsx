@@ -191,7 +191,7 @@ export default function Chat() {
             <div className="message-fade-overlay" />
             <div className="max-w-3xl w-full">
               <form id="chat-form" onSubmit={form.handleSubmit(onSubmit)}>
-                 <input
+                 
   
     <input
   type="file"
