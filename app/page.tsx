@@ -191,6 +191,40 @@ export default function Chat() {
             <div className="message-fade-overlay" />
             <div className="max-w-3xl w-full">
               <form id="chat-form" onSubmit={form.handleSubmit(onSubmit)}>
+                 <input
+                     type="file"
+                     accept="image/*"
+                     capture="environment"
+                     className="border p-2 rounded mb-2"
+                     onChange={async (e) => {
+                         const file = e.target.files?.[0];
+                         if (!file) return;
+
+                         const formData = new FormData();
+                         formData.append("image", file);
+
+                         // show temporary "analyzing" message
+                        addMessage({
+                           id: Date.now(),
+                           role: "assistant",
+                           content: "📸 Analyzing image…",
+                            });
+
+                        const res = await fetch("/api/chat", {
+                        method: "POST",
+                        body: formData,
+                        });
+
+                       const data = await res.json();
+
+                        // show result
+                        addMessage({
+                        id: Date.now(),
+                        role: "assistant",
+                        content: data.response,
+                        });
+                      }}
+                   />
                 <FieldGroup>
                   <Controller
                     name="message"
