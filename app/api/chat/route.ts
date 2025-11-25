@@ -9,7 +9,7 @@ import { vectorDatabaseSearch } from './tools/search-vector-database';
 export const maxDuration = 30;
 export async function POST(req: Request) {
     
-                    export async function POST(req: Request) {
+                    
 
     const contentType = req.headers.get("content-type") || "";
 
@@ -118,7 +118,7 @@ export async function POST(req: Request) {
 
                 return createUIMessageStreamResponse({ stream });
             }
-        }
+        
     }
 
     const result = streamText({
