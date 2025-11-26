@@ -2,7 +2,7 @@
 // BACKEND — Cosmetic OCR + Safety Analysis
 // ======================================================
 
-export const runtime = "nodejs"; // SHARP requires node
+export const runtime = "nodejs"; // SHARP requires node runtime
 export const preferredRegion = "bom1";
 
 import OpenAI from "openai";
@@ -32,7 +32,7 @@ export async function POST(req: Request) {
   const contentType = req.headers.get("content-type") || "";
 
   // ======================================================
-  // 📸 IMAGE FLOW
+  // 📸 IMAGE FLOW — Cosmetic OCR + Analysis
   // ======================================================
   if (contentType.includes("multipart/form-data")) {
     const formData = await req.formData();
@@ -49,10 +49,11 @@ export async function POST(req: Request) {
     const arr = new Uint8Array(await file.arrayBuffer());
     const buffer = Buffer.from(arr);
 
-    // Only safe rotate (no resize)
+    // Only safe auto-rotate (NO resize, NO extra processing)
     let processed = buffer;
     try {
-      processed = await sharp(buffer).rotate().toBuffer();
+      // ⭐ IMPORTANT FIX FOR VERCEL TYPE ERROR ⭐
+      processed = await sharp(buffer as any).rotate().toBuffer();
     } catch (e) {
       processed = buffer;
     }
@@ -65,9 +66,8 @@ Extract ONLY the cosmetic ingredients from this image.
 
 Rules:
 - Read ONLY the text after "Ingredients:"
-- DO NOT guess ingredients
-- DO NOT hallucinate
-- If unreadable → "UNREADABLE"
+- DO NOT guess or hallucinate ingredients
+- If unreadable → return "UNREADABLE"
 
 <image>${dataUrl}</image>
 `;
@@ -80,7 +80,7 @@ Rules:
 
     const extracted = ocrRes.output_text?.trim() || "UNREADABLE";
 
-    // -------------------- ANALYSIS STEP --------------------
+    // -------------------- SAFETY ANALYSIS STEP --------------------
     const analysisPrompt = `
 You are an Indian cosmetic ingredient safety specialist.
 
@@ -131,20 +131,21 @@ COMEDOGENIC
   }
 
   // ======================================================
-  // 💬 TEXT CHAT MODE
+  // 💬 NORMAL TEXT CHAT MODE
   // ======================================================
 
   const { messages }: { messages: UIMessage[] } = await req.json();
   const latest = messages.filter((m) => m.role === "user").pop();
 
   if (latest) {
-    const textParts =
+    const text =
       latest.parts
         ?.filter((p) => p.type === "text")
         .map((p) => (p as any).text)
         .join("") || "";
 
-    const moderation = await isContentFlagged(textParts);
+    const moderation = await isContentFlagged(text);
+
     if (moderation.flagged) {
       const stream = createUIMessageStream({
         execute({ writer }) {
