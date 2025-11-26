@@ -1,7 +1,8 @@
-// =====================================================
-// FORCE NODE RUNTIME (sharp requires Node.js env)
-// =====================================================
-export const runtime = "nodejs";
+// ======================================================
+// BACKEND — Cosmetic OCR + Safety Analysis
+// ======================================================
+
+export const runtime = "nodejs"; // SHARP requires node
 export const preferredRegion = "bom1";
 
 import OpenAI from "openai";
@@ -30,9 +31,9 @@ export const maxDuration = 30;
 export async function POST(req: Request) {
   const contentType = req.headers.get("content-type") || "";
 
-  // =====================================================
-  // 📸 IMAGE MODE — OCR + COSMETIC ANALYSIS
-  // =====================================================
+  // ======================================================
+  // 📸 IMAGE FLOW
+  // ======================================================
   if (contentType.includes("multipart/form-data")) {
     const formData = await req.formData();
     const file = formData.get("image") as File | null;
@@ -44,62 +45,50 @@ export async function POST(req: Request) {
       );
     }
 
-    // -----------------------------------------
-    // FILE → SAFE NODE BUFFER
-    // -----------------------------------------
-    const ab = await file.arrayBuffer();
-    const buffer = Buffer.from(new Uint8Array(ab));
+    // Convert File → Node Buffer
+    const arr = new Uint8Array(await file.arrayBuffer());
+    const buffer = Buffer.from(arr);
 
-    // 🔥 FIX: force EXACT Node.js buffer to avoid Vercel typing errors
-    const nodeBuffer = Buffer.from(buffer);
-
-    // -----------------------------------------
-    // LIGHT ENHANCEMENT (rotate only)
-    // -----------------------------------------
-    let enhanced = nodeBuffer;
+    // Only safe rotate (no resize)
+    let processed = buffer;
     try {
-      enhanced = await sharp(nodeBuffer).rotate().toBuffer();
-    } catch {
-      enhanced = nodeBuffer;
+      processed = await sharp(buffer).rotate().toBuffer();
+    } catch (e) {
+      processed = buffer;
     }
 
-    const dataUrl = `data:${file.type};base64,${enhanced.toString("base64")}`;
+    const dataUrl = `data:${file.type};base64,${processed.toString("base64")}`;
 
-    // -----------------------------------------
-    // OCR STEP
-    // -----------------------------------------
+    // -------------------- OCR STEP --------------------
     const ocrPrompt = `
-Extract ONLY the cosmetic ingredient list from the image.
+Extract ONLY the cosmetic ingredients from this image.
 
-RULES:
-- Only extract text after "Ingredients:" or similar.
-- Do NOT guess ingredients.
-- No extra words.
-- If unreadable, return "UNREADABLE".
+Rules:
+- Read ONLY the text after "Ingredients:"
+- DO NOT guess ingredients
+- DO NOT hallucinate
+- If unreadable → "UNREADABLE"
 
 <image>${dataUrl}</image>
 `;
 
     const ocrRes = await openai.responses.create({
       model: "gpt-4o-mini",
-      input: ocrPrompt,
-      temperature: 0
+      temperature: 0,
+      input: ocrPrompt
     });
 
     const extracted = ocrRes.output_text?.trim() || "UNREADABLE";
 
-    // -----------------------------------------
-    // SAFETY ANALYSIS STEP
-    // -----------------------------------------
+    // -------------------- ANALYSIS STEP --------------------
     const analysisPrompt = `
-You are an Indian cosmetics ingredient safety evaluator.
+You are an Indian cosmetic ingredient safety specialist.
 
-Analyze the following ingredient list:
+Analyze the following list:
 
 "${extracted}"
 
 Return STRICT JSON ONLY:
-
 {
   "ingredients": [
     { "name": "", "classification": "", "reason": "" }
@@ -109,19 +98,19 @@ Return STRICT JSON ONLY:
 }
 
 Classification rules:
-- SAFE
-- IRRITANT (fragrance, sulfates, essential oils)
-- RESTRICTED/BANNED (mercury, lead, hydroquinone OTC)
-- PREGNANCY_UNSAFE (retinoids, strong BHA/AHA)
-- KID_UNSAFE (MIT/CMIT, heavy fragrances)
-- COMEDOGENIC (coconut oil, cocoa butter, shea butter)
+SAFE
+IRRITANT
+RESTRICTED/BANNED
+PREGNANCY_UNSAFE
+KID_UNSAFE
+COMEDOGENIC
 `;
 
     const analysisRes = await openai.responses.create({
       model: "gpt-4o-mini",
-      input: analysisPrompt,
       temperature: 0,
-      max_output_tokens: 1500
+      max_output_tokens: 1200,
+      input: analysisPrompt
     });
 
     let parsed;
@@ -131,7 +120,7 @@ Classification rules:
       parsed = {
         ingredients: [],
         score: 5,
-        summary: "Could not parse output JSON.",
+        summary: "Could not parse JSON.",
         raw: analysisRes.output_text
       };
     }
@@ -141,23 +130,21 @@ Classification rules:
     });
   }
 
-  // =====================================================
-  // 💬 NORMAL TEXT CHAT MODE
-  // =====================================================
+  // ======================================================
+  // 💬 TEXT CHAT MODE
+  // ======================================================
 
   const { messages }: { messages: UIMessage[] } = await req.json();
-
   const latest = messages.filter((m) => m.role === "user").pop();
 
   if (latest) {
-    const text =
+    const textParts =
       latest.parts
         ?.filter((p) => p.type === "text")
-        .map((p) => ("text" in p ? p.text : ""))
+        .map((p) => (p as any).text)
         .join("") || "";
 
-    const moderation = await isContentFlagged(text);
-
+    const moderation = await isContentFlagged(textParts);
     if (moderation.flagged) {
       const stream = createUIMessageStream({
         execute({ writer }) {
@@ -166,7 +153,8 @@ Classification rules:
           writer.write({
             type: "text-delta",
             id: "blocked",
-            delta: moderation.denialMessage || "Message blocked."
+            delta:
+              moderation.denialMessage || "Message blocked."
           });
           writer.write({ type: "text-end", id: "blocked" });
           writer.write({ type: "finish" });
@@ -176,7 +164,6 @@ Classification rules:
     }
   }
 
-  // — Streaming chat continues normally —
   const result = streamText({
     model: MODEL,
     system: SYSTEM_PROMPT,
@@ -185,7 +172,5 @@ Classification rules:
     stopWhen: stepCountIs(10)
   });
 
-  return result.toUIMessageStreamResponse({
-    sendReasoning: true
-  });
+  return result.toUIMessageStreamResponse({ sendReasoning: true });
 }
