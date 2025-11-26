@@ -1,16 +1,16 @@
 export const runtime = "nodejs";
 
-import sharp from "sharp";
 import OpenAI from "openai";
+import sharp from "sharp";
 import { Buffer } from "buffer";
 
 import {
   streamText,
   UIMessage,
   convertToModelMessages,
-  stepCountIs,
   createUIMessageStream,
   createUIMessageStreamResponse,
+  stepCountIs
 } from "ai";
 
 import { MODEL } from "@/config";
@@ -26,116 +26,123 @@ export const maxDuration = 30;
 export async function POST(req: Request) {
   const contentType = req.headers.get("content-type") || "";
 
-  // -----------------------------------------------------------
-  // IMAGE UPLOAD FLOW
-  // -----------------------------------------------------------
+  // ---------------------------------------------------------------------
+  // 📸 IMAGE MODE — Cosmetic Ingredient OCR + Safety Analysis
+  // ---------------------------------------------------------------------
   if (contentType.includes("multipart/form-data")) {
     const formData = await req.formData();
     const file = formData.get("image") as File | null;
     if (!file)
-      return new Response(
-        JSON.stringify({ response: "No image provided" }),
-        { status: 400 }
-      );
+      return Response.json({ response: "No image uploaded." }, { status: 400 });
 
-    // ⭐ FIXED: Always produce a strict Node Buffer
-    const arrayBuf = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuf) as Buffer;
+    // Convert to Node Buffer
+    const u8 = new Uint8Array(await file.arrayBuffer());
+    const buffer = Buffer.from(u8);
 
-    // ⭐ FIXED: Sharp requires explicit cast
-    let enhancedBuffer: Buffer = buffer;
+    // Light rotate only (NO resizing, NO sharpening)
+    let enhanced = buffer;
     try {
-      enhancedBuffer = await sharp(buffer as unknown as Buffer)
-        .rotate()
-        .resize({ width: 1600, withoutEnlargement: true })
-        .grayscale()
-        .sharpen()
-        .normalize()
-        .jpeg({ quality: 82 })
-        .toBuffer();
-    } catch (err) {
-      enhancedBuffer = buffer;
+      enhanced = await sharp(buffer).rotate().toBuffer();
+    } catch (_) {
+      enhanced = buffer;
     }
 
-    const dataUrl = `data:${file.type};base64,${enhancedBuffer.toString(
-      "base64"
-    )}`;
+    const dataUrl = `data:${file.type};base64,${enhanced.toString("base64")}`;
 
-    // --- OCR ---
-    const extractPrompt = `
-Extract ONLY the ingredient list. No extra text.
+    // --------------------- OCR STEP ---------------------
+    const ocrPrompt = `
+Extract ONLY the cosmetic ingredient list from this image.
+Very strict rules:
+- Return ONLY the text after "Ingredients:" or equivalent.
+- Do NOT guess ingredients.
+- If unreadable, say "UNREADABLE".
 
 <image>${dataUrl}</image>
 `;
 
-    const extractRes = await openai.responses.create({
-      model: "gpt-4o-mini",
-      input: extractPrompt,
+    const ocrRes = await openai.responses.create({
+      model: "gpt-4o-mini",      // (FIXED — Strong OCR)
+      temperature: 0,
+      input: ocrPrompt
     });
 
-    const extracted = (extractRes.output_text || "").trim();
+    const extracted = ocrRes.output_text?.trim() || "UNREADABLE";
 
-    // --- ANALYSIS ---
+    // --------------------- ANALYSIS STEP ---------------------
     const analysisPrompt = `
-Analyze these cosmetic ingredients using Indian BIS & cosmetic safety guidelines.
+You are an Indian cosmetic ingredient safety specialist.
+Analyze the ingredient list below:
 
-Ingredients:
-${extracted}
+"${extracted}"
 
-Return structured JSON.
+Return STRICT JSON ONLY:
+
+{
+  "ingredients": [
+    { "name": "...", "classification": "...", "reason": "..." }
+  ],
+  "score": number,
+  "summary": "..."
+}
+
+Rules:
+- SAFE: gentle surfactants, humectants, mild preservatives.
+- IRRITANT: fragrances, sulfates, essential oils.
+- RESTRICTED/BANNED (India): mercury compounds, lead compounds, hydroquinone (OTC), strong steroids.
+- PREGNANCY UNSAFE: retinoids, salicylic acid >2%, hydroquinone.
+- KID UNSAFE: strong fragrances, sulfates, MIT/CMIT.
+- COMEDOGENIC: coconut oil, shea butter, cocoa butter.
 `;
 
     const analysisRes = await openai.responses.create({
-      model: "gpt-4.1-mini",
-      input: analysisPrompt,
+      model: "gpt-4o-mini",
       temperature: 0,
+      max_output_tokens: 1000,
+      input: analysisPrompt
     });
 
     let parsed;
     try {
-      parsed = JSON.parse(analysisRes.output_text || "");
+      parsed = JSON.parse(analysisRes.output_text || "{}");
     } catch {
       parsed = {
-        extracted,
-        error: "Could not parse structured response",
+        ingredients: [],
+        score: 5,
+        summary: "Could not parse structured JSON.",
+        raw: analysisRes.output_text
       };
     }
 
-    return new Response(
-      JSON.stringify({
-        response: JSON.stringify(parsed, null, 2),
-        raw: parsed,
-      }),
-      { status: 200 }
-    );
+    return Response.json({ response: JSON.stringify(parsed, null, 2) });
   }
 
-  // -----------------------------------------------------------
-  // NORMAL CHAT FLOW
-  // -----------------------------------------------------------
+  // ---------------------------------------------------------------------
+  // 💬 TEXT CHAT MODE (unchanged)
+  // ---------------------------------------------------------------------
   const { messages }: { messages: UIMessage[] } = await req.json();
-  const latest = messages.filter((m) => m.role === "user").pop();
 
+  const latest = messages.filter((m) => m.role === "user").pop();
   if (latest) {
-    const textParts = latest.parts
-      ?.filter((p) => p.type === "text")
-      .map((p) => ("text" in p ? p.text : ""))
-      .join(" ");
+    const textParts =
+      latest.parts
+        ?.filter((p) => p.type === "text")
+        .map((p) => ("text" in p ? p.text : ""))
+        .join("") || "";
 
     const moderation = await isContentFlagged(textParts);
     if (moderation.flagged) {
       const stream = createUIMessageStream({
         execute({ writer }) {
           writer.write({ type: "start" });
-          writer.write({ type: "text-start", id: "block" });
+          writer.write({ type: "text-start", id: "blocked" });
           writer.write({
             type: "text-delta",
-            id: "block",
-            delta: moderation.denialMessage || "Message blocked",
+            id: "blocked",
+            delta: moderation.denialMessage || "Message blocked."
           });
-          writer.write({ type: "text-end", id: "block" });
+          writer.write({ type: "text-end", id: "blocked" });
           writer.write({ type: "finish" });
-        },
+        }
       });
 
       return createUIMessageStreamResponse({ stream });
@@ -147,7 +154,7 @@ Return structured JSON.
     system: SYSTEM_PROMPT,
     messages: convertToModelMessages(messages),
     tools: { webSearch, vectorDatabaseSearch },
-    stopWhen: stepCountIs(10),
+    stopWhen: stepCountIs(10)
   });
 
   return result.toUIMessageStreamResponse({ sendReasoning: true });
