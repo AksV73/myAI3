@@ -1,10 +1,10 @@
 import {
-    streamText,
-    UIMessage,
-    convertToModelMessages,
-    stepCountIs,
-    createUIMessageStream,
-    createUIMessageStreamResponse
+  streamText,
+  UIMessage,
+  convertToModelMessages,
+  stepCountIs,
+  createUIMessageStream,
+  createUIMessageStreamResponse
 } from "ai";
 
 import { MODEL } from "@/config";
@@ -16,109 +16,114 @@ import { vectorDatabaseSearch } from "./tools/search-vector-database";
 export const maxDuration = 30;
 
 export async function POST(req: Request) {
-    const contentType = req.headers.get("content-type") || "";
+  const contentType = req.headers.get("content-type") || "";
 
-    // ======================================================
-    // 📸 CASE 1 — IMAGE UPLOAD
-    // ======================================================
-    if (contentType.includes("multipart/form-data")) {
-        const OpenAI = (await import("openai")).default;
-        const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+  // ----------------------------------------------------------------------
+  // 📸 CASE 1 — IMAGE UPLOAD (multipart/form-data)
+  // ----------------------------------------------------------------------
+  if (contentType.includes("multipart/form-data")) {
+    const formData = await req.formData();
+    const file = formData.get("image") as File;
 
-        const formData = await req.formData();
-        const file = formData.get("image") as File;
-
-        if (!file) {
-            return Response.json({ response: "No image found." });
-        }
-
-        // Convert image → dataURL
-        const buffer = Buffer.from(await file.arrayBuffer());
-        const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
-
-        // 1️⃣ Extract text from image
-        const extractRes = await client.responses.create({
-            model: "gpt-4.1-mini",
-            input: `
-Extract ONLY the ingredient list from this food label.
-Return plain text only.
-
-<image>${dataUrl}</image>
-`
-        });
-
-        const extracted = extractRes.output_text || "Could not extract ingredients.";
-
-        // 2️⃣ Analyze according to FSSAI rules
-        const analyzeRes = await client.responses.create({
-            model: "gpt-4.1-mini",
-            input: `
-You are an Indian FSSAI Additive Analyzer.
-Classify each ingredient into SAFE / HARMFUL / BANNED / KID-SENSITIVE.
-Use bullet points. Be accurate.
-
-Ingredients:
-${extracted}
-`
-        });
-
-        const analysis = analyzeRes.output_text || "Could not analyze ingredients.";
-
-        return Response.json({
-            response:
-`📸 **Extracted Ingredients:**  
-${extracted}
-
-🔍 **FSSAI Safety Analysis:**  
-${analysis}`
-        });
+    if (!file) {
+      return Response.json({ response: "No image received." });
     }
 
-    // ======================================================
-    // 💬 CASE 2 — NORMAL CHAT
-    // ======================================================
-    const { messages }: { messages: UIMessage[] } = await req.json();
+    // Convert image → base64 → data URL
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
-    const latest = messages.filter(m => m.role === "user").pop();
+    // Lazy import OpenAI (fixes Next.js edge issues)
+    const OpenAI = (await import("openai")).default;
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY!,
+    });
 
-    if (latest) {
-        const textParts = latest.parts
-            .filter(p => p.type === "text")
-            .map(p => ("text" in p ? p.text : ""))
-            .join("");
+    // STEP 1 — Extract ingredients
+    const extractRes = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: "Extract ONLY the ingredient list from the food label. Plain text only." },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Extract ingredients from this image:" },
+            { type: "image", image: dataUrl }
+          ]
+        }
+      ]
+    });
 
-        const moderation = await isContentFlagged(textParts);
+    const extracted = extractRes.choices[0].message.content || "Could not extract ingredients.";
 
-        if (moderation.flagged) {
-            const stream = createUIMessageStream({
-                execute({ writer }) {
-                    const id = "blocked-msg";
-                    writer.write({ type: "start" });
-                    writer.write({ type: "text-start", id });
-                    writer.write({
-                        type: "text-delta",
-                        id,
-                        delta: moderation.denialMessage || "Message blocked."
-                    });
-                    writer.write({ type: "text-end", id });
-                    writer.write({ type: "finish" });
-                }
+    // STEP 2 — Analyze ingredients
+    const analysisRes = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are an Indian FSSAI Additive Analyzer. Classify ingredients into SAFE, HARMFUL, BANNED, KID-SENSITIVE. Use bullet points."
+        },
+        { role: "user", content: extracted }
+      ]
+    });
+
+    const analysis = analysisRes.choices[0].message.content;
+
+    return Response.json({
+      response: `📸 **Extracted Ingredients**:\n${extracted}\n\n🔍 **FSSAI Analysis:**\n${analysis}`
+    });
+  }
+
+  // ----------------------------------------------------------------------
+  // 💬 CASE 2 — NORMAL TEXT CHAT
+  // ----------------------------------------------------------------------
+  const body = await req.json();
+  const { messages }: { messages: UIMessage[] } = body;
+
+  const latestUserMessage = messages.filter((m) => m.role === "user").pop();
+
+  if (latestUserMessage) {
+    const text = latestUserMessage.parts
+      .filter((p) => p.type === "text")
+      .map((p) => ("text" in p ? p.text : ""))
+      .join("");
+
+    if (text) {
+      const moderation = await isContentFlagged(text);
+
+      if (moderation.flagged) {
+        const stream = createUIMessageStream({
+          execute({ writer }) {
+            const id = "mod-warning";
+            writer.write({ type: "start" });
+            writer.write({ type: "text-start", id });
+            writer.write({
+              type: "text-delta",
+              id,
+              delta: moderation.denialMessage || "Your message violates our guidelines."
             });
+            writer.write({ type: "text-end", id });
+            writer.write({ type: "finish" });
+          }
+        });
 
-            return createUIMessageStreamResponse({ stream });
-        }
+        return createUIMessageStreamResponse({ stream });
+      }
     }
+  }
 
-    const result = streamText({
-        model: MODEL,
-        system: SYSTEM_PROMPT,
-        messages: convertToModelMessages(messages),
-        tools: { webSearch, vectorDatabaseSearch },
-        stopWhen: stepCountIs(10)
-    });
+  // Streaming text model
+  const result = streamText({
+    model: MODEL,
+    system: SYSTEM_PROMPT,
+    messages: convertToModelMessages(messages),
+    tools: { webSearch, vectorDatabaseSearch },
+    stopWhen: stepCountIs(10)
+  });
 
-    return result.toUIMessageStreamResponse({
-        sendReasoning: true
-    });
+  return result.toUIMessageStreamResponse({
+    sendReasoning: true
+  });
 }
-
