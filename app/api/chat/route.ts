@@ -2,12 +2,12 @@
 // BACKEND — Cosmetic OCR + Safety Analysis
 // ======================================================
 
-export const runtime = "nodejs"; // SHARP requires node runtime
+export const runtime = "nodejs";
 export const preferredRegion = "bom1";
 
 import OpenAI from "openai";
 import sharp from "sharp";
-import { Buffer } from "buffer";
+import { Readable } from "stream";
 
 import {
   streamText,
@@ -28,46 +28,50 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
 export const maxDuration = 30;
 
+// Convert Buffer → Stream (Vercel TS-safe)
+function bufferToStream(buffer: Buffer) {
+  const stream = new Readable();
+  stream.push(buffer);
+  stream.push(null);
+  return stream;
+}
+
 export async function POST(req: Request) {
   const contentType = req.headers.get("content-type") || "";
 
   // ======================================================
-  // 📸 IMAGE FLOW — Cosmetic OCR + Analysis
+  // 📸 IMAGE MODE
   // ======================================================
   if (contentType.includes("multipart/form-data")) {
     const formData = await req.formData();
     const file = formData.get("image") as File | null;
 
-    if (!file) {
-      return Response.json(
-        { response: "No image uploaded." },
-        { status: 400 }
-      );
-    }
+    if (!file)
+      return Response.json({ response: "No image uploaded." }, { status: 400 });
 
-    // Convert File → Node Buffer
+    // Convert File → Buffer
     const arr = new Uint8Array(await file.arrayBuffer());
     const buffer = Buffer.from(arr);
 
-    // Only safe auto-rotate (NO resize, NO extra processing)
+    // ⭐ STREAM INTO SHARP (Fixes ALL Vercel Type Errors)
     let processed = buffer;
     try {
-      // ⭐ IMPORTANT FIX FOR VERCEL TYPE ERROR ⭐
-      processed = await sharp(buffer as any).rotate().toBuffer();
-    } catch (e) {
+      const stream = bufferToStream(buffer);
+      processed = await sharp(stream).rotate().toBuffer();
+    } catch {
       processed = buffer;
     }
 
     const dataUrl = `data:${file.type};base64,${processed.toString("base64")}`;
 
-    // -------------------- OCR STEP --------------------
+    // ---------------- OCR ----------------
     const ocrPrompt = `
-Extract ONLY the cosmetic ingredients from this image.
+Extract ONLY the cosmetic ingredients from this image:
 
 Rules:
-- Read ONLY the text after "Ingredients:"
-- DO NOT guess or hallucinate ingredients
-- If unreadable → return "UNREADABLE"
+• Only text after "Ingredients:"
+• No extras, no guesses
+• If unreadable: "UNREADABLE"
 
 <image>${dataUrl}</image>
 `;
@@ -80,11 +84,11 @@ Rules:
 
     const extracted = ocrRes.output_text?.trim() || "UNREADABLE";
 
-    // -------------------- SAFETY ANALYSIS STEP --------------------
+    // ---------------- ANALYSIS ----------------
     const analysisPrompt = `
 You are an Indian cosmetic ingredient safety specialist.
 
-Analyze the following list:
+Analyze:
 
 "${extracted}"
 
@@ -96,14 +100,6 @@ Return STRICT JSON ONLY:
   "score": 0,
   "summary": ""
 }
-
-Classification rules:
-SAFE
-IRRITANT
-RESTRICTED/BANNED
-PREGNANCY_UNSAFE
-KID_UNSAFE
-COMEDOGENIC
 `;
 
     const analysisRes = await openai.responses.create({
@@ -131,7 +127,7 @@ COMEDOGENIC
   }
 
   // ======================================================
-  // 💬 NORMAL TEXT CHAT MODE
+  // 💬 TEXT MODE
   // ======================================================
 
   const { messages }: { messages: UIMessage[] } = await req.json();
