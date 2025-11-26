@@ -69,7 +69,7 @@ Extract ONLY the ingredient list. No extra text.
 `;
 
     const extractRes = await openai.responses.create({
-      model: "gpt-4.1-mini",
+      model: "gpt-4o-mini",
       input: extractPrompt,
     });
 
