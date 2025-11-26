@@ -29,25 +29,25 @@ const formSchema = z.object({
 
 const STORAGE_KEY = "chat-messages";
 
-type StorageData = {
+type SavedState = {
   messages: UIMessage[];
   durations: Record<string, number>;
 };
 
-const loadMessages = () => {
+const loadMessages = (): SavedState => {
   if (typeof window === "undefined") return { messages: [], durations: {} };
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { messages: [], durations: {} };
-    return JSON.parse(raw);
+    return raw ? JSON.parse(raw) : { messages: [], durations: {} };
   } catch {
     return { messages: [], durations: {} };
   }
 };
 
 const saveMessages = (messages: UIMessage[], durations: Record<string, number>) => {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ messages, durations }));
+  if (typeof window !== "undefined") {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ messages, durations }));
+  }
 };
 
 export default function Chat() {
@@ -55,7 +55,8 @@ export default function Chat() {
   const welcomeRef = useRef(false);
 
   const stored = typeof window !== "undefined" ? loadMessages() : { messages: [], durations: {} };
-  const [durations, setDurations] = useState(stored.durations);
+
+  const [durations, setDurations] = useState<Record<string, number>>(stored.durations);
   const [initialMessages] = useState<UIMessage[]>(stored.messages);
 
   const { messages, sendMessage, status, stop, setMessages } = useChat({
@@ -72,7 +73,7 @@ export default function Chat() {
     if (isClient) saveMessages(messages, durations);
   }, [messages, durations, isClient]);
 
-  // Welcome message
+  // 🌟 Welcome message
   useEffect(() => {
     if (!isClient || initialMessages.length !== 0 || welcomeRef.current) return;
 
@@ -92,6 +93,7 @@ export default function Chat() {
     defaultValues: { message: "" }
   });
 
+  // 💬 Send text message
   function onSubmit(data: z.infer<typeof formSchema>) {
     sendMessage({ text: data.message });
     form.reset();
@@ -141,7 +143,12 @@ export default function Chat() {
                   status={status}
                   durations={durations}
                   onDurationChange={(key, d) =>
-                    setDurations((prev) => ({ ...prev, [key]: d }))
+                    setDurations(
+                      (prev: Record<string, number>) => ({
+                        ...prev,
+                        [key]: d
+                      })
+                    )
                   }
                 />
 
@@ -164,9 +171,7 @@ export default function Chat() {
 
               <form id="chat-form" onSubmit={form.handleSubmit(onSubmit)}>
 
-                {/* ========================= */}
-                {/* 📸 IMAGE UPLOAD - FIXED   */}
-                {/* ========================= */}
+                {/* 📸 IMAGE UPLOAD */}
                 <input
                   type="file"
                   accept="image/*"
@@ -179,12 +184,12 @@ export default function Chat() {
                     const formData = new FormData();
                     formData.append("image", file);
 
-                    // 1️⃣ Remove previous OCR messages
+                    // Remove previous OCR messages
                     setMessages((prev) =>
                       prev.filter((m) => !m.id?.startsWith("ocr-"))
                     );
 
-                    // 2️⃣ Add analyzing message
+                    // Add analyzing message
                     const analyzing = {
                       id: `ocr-analyzing-${Date.now()}`,
                       role: "assistant",
@@ -192,7 +197,7 @@ export default function Chat() {
                     };
                     setMessages((prev) => [...prev, analyzing]);
 
-                    // 3️⃣ Send to backend
+                    // Send to backend
                     const res = await fetch("/api/chat", {
                       method: "POST",
                       body: formData
@@ -200,12 +205,12 @@ export default function Chat() {
 
                     const data = await res.json();
 
-                    // 4️⃣ Remove analyzing message
+                    // Remove analyzing message
                     setMessages((prev) =>
                       prev.filter((m) => m.id !== analyzing.id)
                     );
 
-                    // 5️⃣ Insert final OCR result
+                    // Insert final OCR result
                     const resultMsg = {
                       id: `ocr-${Date.now()}`,
                       role: "assistant",
@@ -213,7 +218,7 @@ export default function Chat() {
                     };
                     setMessages((prev) => [...prev, resultMsg]);
 
-                    // 6️⃣ Reset input so user can upload same image again
+                    // Reset input (allows same file upload again)
                     e.target.value = "";
                   }}
                 />
