@@ -1,5 +1,5 @@
 // ============================================================
-//  /app/api/chat/route.ts — CLEAN + CRISP OUTPUT VERSION
+//  FINAL STABLE ROUTE — ZERO ERRORS, JSON SAFE
 // ============================================================
 
 import {
@@ -19,199 +19,148 @@ import { vectorDatabaseSearch } from "./tools/search-vector-database";
 
 export const maxDuration = 30;
 
-// ------------------------------------------------------------
-// 🛠️ Helper Functions For Cleanup + Tables
-// ------------------------------------------------------------
-
-function extractByKeyword(text: string, keyword: string) {
-  return text
-    .split(" - ")
-    .filter((line) => line.toLowerCase().includes(keyword))
-    .map((line) => line.split(" ")[0].trim())
-    .filter(Boolean);
+// -----------------------------------------
+// IMAGE + SAFETY ANALYSIS HELPER
+// -----------------------------------------
+function safe(value: any, fallback = "") {
+  return value ? String(value) : fallback;
 }
 
-function extractSafe(text: string) {
-  return extractByKeyword(text, "safe");
-}
+function makeTable(safetyLines: string[]) {
+  if (!safetyLines.length) return "No data.";
 
-function extractCaution(text: string) {
-  return extractByKeyword(text, "caution");
-}
-
-function extractHarmful(text: string) {
-  return extractByKeyword(text, "harmful");
-}
-
-function extractBanned(text: string) {
-  return extractByKeyword(text, "banned");
-}
-
-function extractKid(text: string) {
-  return extractByKeyword(text, "kid");
-}
-
-function formatIngredientsAsTable(text: string) {
-  const rows = text
-    .split(" - ")
-    .filter(
-      (line) =>
-        line.includes("Safe") ||
-        line.includes("Harmful") ||
-        line.includes("Banned") ||
-        line.includes("Caution") ||
-        line.includes("Kid")
-    )
+  const rows = safetyLines
     .map((line) => {
-      const ing = line.split(" ")[0].trim();
-      let status = "🟢 Safe";
+      // Example format: "Sugar 🟢 Safe (ok)"
+      const match = line.match(/^(.*?)\s+(🟢|🟡|🔴|⛔|👶)\s+(.*?)(?:\((.*?)\))?$/);
 
-      if (line.includes("Harmful")) status = "🔴 Harmful";
-      else if (line.includes("Banned")) status = "⛔ Banned";
-      else if (line.includes("Caution")) status = "🟡 Caution";
-      else if (line.toLowerCase().includes("kid")) status = "👶 Kid-sensitive";
+      if (!match) return null;
 
-      const reason =
-        line.includes("(") && line.includes(")")
-          ? line.substring(line.indexOf("(") + 1, line.indexOf(")"))
-          : "—";
+      const name = match[1].trim();
+      const icon = match[2].trim();
+      const status = match[3].trim();
+      const reason = match[4] ? match[4].trim() : "—";
 
-      return `| ${ing} | ${status} | ${reason} |`;
+      return `| ${name} | ${icon} ${status} | ${reason} |`;
     })
+    .filter(Boolean)
     .join("\n");
 
   return `
-| Ingredient | Status | Notes |
+| Ingredient | Status | Reason |
 |-----------|--------|--------|
 ${rows}
 `;
 }
 
-// ------------------------------------------------------------
-//  📌 MAIN ROUTE
-// ------------------------------------------------------------
+// -----------------------------------------
+// MAIN ROUTE
+// -----------------------------------------
 export async function POST(req: Request) {
-  const contentType = req.headers.get("content-type") || "";
+  const type = req.headers.get("content-type") || "";
 
   // ============================================================
-  //  📸 IMAGE MODE
+  // 📸 IMAGE UPLOAD MODE
   // ============================================================
-  if (contentType.includes("multipart/form-data")) {
-    const OpenAI = (await import("openai")).default;
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+  if (type.includes("multipart/form-data")) {
+    try {
+      const OpenAI = (await import("openai")).default;
+      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-    const fd = await req.formData();
-    const file = fd.get("image") as File | null;
+      const fd = await req.formData();
+      const file = fd.get("image") as File | null;
 
-    if (!file) {
-      return Response.json({ response: "No image uploaded." });
-    }
+      if (!file) {
+        return Response.json({ response: "No file uploaded." });
+      }
 
-    // Convert image → Base64
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
+      // Convert image → base64
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
-    // ------------------------------------------------------------
-    //  OCR — Extract ingredients
-    // ------------------------------------------------------------
-    const ocr = await client.responses.create({
-      model: "gpt-4-1-mini",
-      input: `
-Extract ONLY the ingredient list from this food label.
-Rules:
-- Clean comma-separated ingredients only.
-- Include "Contains" or "May contain" if present.
-- No commentary.
-- If nothing resembles ingredients, return "NOT_FOUND".
+      // -------------------------
+      // STEP 1 — OCR
+      // -------------------------
+      const ocrRes = await client.responses.create({
+        model: "gpt-4-1-mini",
+        input: `
+Extract ONLY the ingredient list. 
+If not found return EXACTLY: NOT_FOUND.
 
 <image>${dataUrl}</image>
 `
-    });
+      });
 
-    const extracted = ocr.output_text?.trim() || "NOT_FOUND";
-    if (extracted === "NOT_FOUND") {
+      const extracted = safe(ocrRes.output_text).trim();
+
+      if (!extracted || extracted === "NOT_FOUND") {
+        return Response.json({
+          response: "⚠️ Could not detect ingredients. Try a clearer image."
+        });
+      }
+
+      // -------------------------
+      // STEP 2 — SAFETY ANALYSIS
+      // -------------------------
+      const safetyRes = await client.responses.create({
+        model: "gpt-4-1-mini",
+        input: `
+Classify each ingredient from this list:
+
+${extracted}
+
+Return ONLY bullet points in this exact format:
+- Sugar 🟢 Safe (short reason)
+- Milk 👶 Kid-sensitive (allergen)
+- XYZ ⛔ Banned (FSSAI rule)
+`
+      });
+
+      const safetyText = safe(safetyRes.output_text);
+      const lines = safetyText
+        .split("\n")
+        .map((x) => x.replace(/^- /, "").trim())
+        .filter((x) => x.length > 0);
+
+      const table = makeTable(lines);
+
+      // -------------------------
+      // RETURN JSON
+      // -------------------------
       return Response.json({
-        response: "⚠️ Could not detect ingredients. Try a clearer image."
+        response: `
+📸 **Extracted Ingredients**
+${extracted}
+
+---
+
+### 🧪 FSSAI Safety Table
+${table}
+
+If you want allergen mapping or kid safety score, just ask!
+        `
+      });
+    } catch (err: any) {
+      return Response.json({
+        response: `❌ Server error: ${err?.message || err}`
       });
     }
-
-    // ------------------------------------------------------------
-    //  FSSAI Analysis (free-form, but we format later)
-    // ------------------------------------------------------------
-    const analysis = await client.responses.create({
-      model: "gpt-4-1-mini",
-      input: `
-You are an Indian FSSAI Safety Analyzer.
-
-Given these ingredients:
-
-${extracted}
-
-Classify each ingredient into:
-- Safe
-- Caution
-- Harmful
-- Banned
-- Kid-sensitive
-
-Return bullet points EXACTLY like:
-- Water 🟢 Safe (harmless)
-- Soybean Oil ⛔ Banned (FSSAI trans fat rule)
-- Milk 👶 Kid-sensitive (allergen)
-
-Do NOT add extra sections. Just the list.
-`
-    });
-
-    const text = analysis.output_text || "";
-
-    // ------------------------------------------------------------
-    //  CLEAN & CRISP OUTPUT
-    // ------------------------------------------------------------
-
-    const finalResponse = `
-📸 **Extracted Ingredients**  
-${extracted}
-
----
-
-### 🧪 FSSAI Safety Summary
-
-| Category | Items |
-|---------|--------|
-| 🟢 Safe | ${extractSafe(text).join(", ") || "—"} |
-| 🟡 Caution | ${extractCaution(text).join(", ") || "—"} |
-| 🔴 Harmful | ${extractHarmful(text).join(", ") || "—"} |
-| ⛔ Banned | ${extractBanned(text).join(", ") || "—"} |
-| 👶 Kid-Sensitive | ${extractKid(text).join(", ") || "—"} |
-
----
-
-### 📋 Detailed Ingredient Table
-${formatIngredientsAsTable(text)}
-
----
-
-If you want allergen mapping, preservatives check, or kid safety score, just ask!
-`;
-
-    return Response.json({ response: finalResponse });
   }
 
   // ============================================================
-  //  💬 NORMAL CHAT MODE
+  // 💬 TEXT CHAT MODE
   // ============================================================
   const { messages }: { messages: UIMessage[] } = await req.json();
   const latest = messages.filter((m) => m.role === "user").pop();
 
   if (latest) {
-    const textParts =
+    const text =
       latest.parts
-        .filter((p) => p.type === "text")
-        .map((p: any) => p.text)
-        .join("") || "";
+        ?.filter((p) => p.type === "text")
+        ?.map((p: any) => p.text)
+        ?.join("") || "";
 
-    const moderation = await isContentFlagged(textParts);
+    const moderation = await isContentFlagged(text);
 
     if (moderation.flagged) {
       const stream = createUIMessageStream({
@@ -221,7 +170,7 @@ If you want allergen mapping, preservatives check, or kid safety score, just ask
           writer.write({
             type: "text-delta",
             id: "blocked",
-            delta: moderation.denialMessage || "Message blocked."
+            delta: moderation.denialMessage
           });
           writer.write({ type: "text-end", id: "blocked" });
           writer.write({ type: "finish" });
@@ -232,7 +181,6 @@ If you want allergen mapping, preservatives check, or kid safety score, just ask
     }
   }
 
-  // Normal chat flow
   const result = streamText({
     model: MODEL,
     system: SYSTEM_PROMPT,
@@ -241,7 +189,5 @@ If you want allergen mapping, preservatives check, or kid safety score, just ask
     stopWhen: stepCountIs(10)
   });
 
-  return result.toUIMessageStreamResponse({
-    sendReasoning: true
-  });
+  return result.toUIMessageStreamResponse({ sendReasoning: true });
 }
