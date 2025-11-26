@@ -158,25 +158,24 @@ ${parsed.summary}
         .map((p: any) => p.text)
         .join("") || "";
 
-    const moderation = await isContentFlagged(content);
-    if (moderation.flagged) {
-      const stream = createUIMessageStream({
-        execute({ writer }) {
-          writer.write({ type: "start" });
-          writer.write({ type: "text-start", id: "blocked" });
-          writer.write({
-            type: "text-delta",
-            id: "blocked",
-            delta: moderation.denialMessage
-          });
-          writer.write({ type: "text-end", id: "blocked" });
-          writer.write({ type: "finish" });
-        }
+   if (moderation.flagged) {
+  const stream = createUIMessageStream({
+    execute({ writer }) {
+      writer.write({ type: "start" });
+      writer.write({ type: "text-start", id: "blocked" });
+      writer.write({
+        type: "text-delta",
+        id: "blocked",
+        delta: moderation.denialMessage ?? "Message blocked for safety."
       });
-
-      return createUIMessageStreamResponse({ stream });
+      writer.write({ type: "text-end", id: "blocked" });
+      writer.write({ type: "finish" });
     }
-  }
+  });
+
+  return createUIMessageStreamResponse({ stream });
+}
+
 
   // Normal chat mode
   const result = streamText({
