@@ -22,25 +22,20 @@ export const maxDuration = 30;
 export async function POST(req: Request) {
   const contentType = req.headers.get("content-type") || "";
 
-  // ======================================================
-  // 📸 CASE 1 — IMAGE UPLOAD
-  // ======================================================
+  // ---------------------- IMAGE MODE ----------------------
   if (contentType.includes("multipart/form-data")) {
     const OpenAI = (await import("openai")).default;
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
     const formData = await req.formData();
     const file = formData.get("image") as File;
+    if (!file) return Response.json({ response: "No image uploaded." });
 
-    if (!file) {
-      return Response.json({ response: "No image uploaded." });
-    }
+    // --- FIXED BUFFER CREATION ---
+    const arr = new Uint8Array(await file.arrayBuffer());
+    const buffer = Buffer.from(arr);
 
-    // ---- FIXED BUFFER CREATION ----
-    const ab = await file.arrayBuffer();
-    const buffer = Buffer.from(new Uint8Array(ab));
-
-    // ---- Image Enhancement ----
+    // --- IMAGE ENHANCEMENT ---
     let enhanced = buffer;
     try {
       enhanced = await sharp(buffer)
@@ -48,18 +43,18 @@ export async function POST(req: Request) {
         .sharpen(0.4)
         .normalize()
         .toBuffer();
-    } catch (err) {
-      enhanced = buffer;
+    } catch (e) {
+      enhanced = buffer; // fallback
     }
 
     const dataUrl = `data:${file.type};base64,${enhanced.toString("base64")}`;
 
-    // ---- OCR ----
+    // --- OCR ---
     const extractRes = await client.responses.create({
       model: "gpt-4.1-mini",
       input: `
-Extract ONLY the ingredient list or anything that looks like ingredients.
-Plain text only.
+Extract ONLY the ingredients or any text that resembles an ingredient list.
+Plain text only. No extra words.
 
 <image>${dataUrl}</image>
 `
@@ -67,60 +62,57 @@ Plain text only.
 
     const extracted = extractRes.output_text?.trim() || "Could not read ingredients.";
 
-    // ---- FSSAI Analysis ----
+    // --- ANALYZE ---
     const analyzeRes = await client.responses.create({
       model: "gpt-4.1-mini",
       input: `
-You are an Indian FSSAI Additive Expert.
-Analyze:
+You are an Indian FSSAI Additive Evaluator.
 
+Analyze the ingredients below:
 ${extracted}
 
-Classify each item into SAFE / HARMFUL / BANNED / KID-SENSITIVE.
-Return bullet points + final score /10.
+Classify each ingredient into:
+- SAFE
+- HARMFUL
+- BANNED
+- KID-SENSITIVE
+
+Return structured bullet points + final score /10.
 `
     });
-
-    const analysis = analyzeRes.output_text || "Could not analyze.";
 
     return Response.json({
       response:
         `📸 **Extracted Ingredients:**\n${extracted}\n\n` +
-        `🔍 **FSSAI Safety Analysis:**\n${analysis}`
+        `🔍 **FSSAI Safety Analysis:**\n${analyzeRes.output_text}`
     });
   }
 
-  // ======================================================
-  // 💬 CASE 2 — NORMAL CHAT
-  // ======================================================
+  // ---------------------- TEXT CHAT MODE ----------------------
   const { messages }: { messages: UIMessage[] } = await req.json();
 
-  const latest = messages.filter((m) => m.role === "user").pop();
-
+  const latest = messages.filter(m => m.role === "user").pop();
   if (latest) {
     const textParts = latest.parts
-      .filter((p) => p.type === "text")
-      .map((p) => ("text" in p ? p.text : ""))
+      .filter(p => p.type === "text")
+      .map(p => p.text)
       .join("");
 
     const moderation = await isContentFlagged(textParts);
-
     if (moderation.flagged) {
       const stream = createUIMessageStream({
         execute({ writer }) {
-          const id = "blocked-msg";
           writer.write({ type: "start" });
-          writer.write({ type: "text-start", id });
+          writer.write({ type: "text-start", id: "blocked" });
           writer.write({
             type: "text-delta",
-            id,
+            id: "blocked",
             delta: moderation.denialMessage || "Message blocked."
           });
-          writer.write({ type: "text-end", id });
+          writer.write({ type: "text-end", id: "blocked" });
           writer.write({ type: "finish" });
         }
       });
-
       return createUIMessageStreamResponse({ stream });
     }
   }
@@ -133,7 +125,5 @@ Return bullet points + final score /10.
     stopWhen: stepCountIs(10)
   });
 
-  return result.toUIMessageStreamResponse({
-    sendReasoning: true
-  });
+  return result.toUIMessageStreamResponse({ sendReasoning: true });
 }
