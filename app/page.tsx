@@ -1,255 +1,115 @@
+// app/page.tsx
 "use client";
 
-import { zodResolver } from "@hookform/resolvers/zod";
-import { Controller, useForm } from "react-hook-form";
-import { toast } from "sonner";
-import * as z from "zod";
-
-import { Button } from "@/components/ui/button";
-import {
-  Field,
-  FieldGroup,
-  FieldLabel,
-} from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
-import { useChat } from "@ai-sdk/react";
-import { ArrowUp, Eraser, Loader2, Plus, PlusIcon, Square } from "lucide-react";
-import { MessageWall } from "@/components/messages/message-wall";
-import { ChatHeader } from "@/app/parts/chat-header";
-import { ChatHeaderBlock } from "@/app/parts/chat-header";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import React, { useRef, useState } from "react";
 import { UIMessage } from "ai";
-import { useEffect, useState, useRef } from "react";
-import { AI_NAME, CLEAR_CHAT_TEXT, OWNER_NAME, WELCOME_MESSAGE } from "@/config";
-import Image from "next/image";
-import Link from "next/link";
 
-const formSchema = z.object({
-  message: z
-    .string()
-    .min(1, "Message cannot be empty.")
-    .max(2000, "Message must be at most 2000 characters."),
-});
-
-const STORAGE_KEY = 'chat-messages';
-
-type StorageData = {
-  messages: UIMessage[];
-  durations: Record<string, number>;
-};
-
-const loadMessagesFromStorage = (): { messages: UIMessage[]; durations: Record<string, number> } => {
-  if (typeof window === 'undefined') return { messages: [], durations: {} };
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (!stored) return { messages: [], durations: {} };
-
-    const parsed = JSON.parse(stored);
-    return {
-      messages: parsed.messages || [],
-      durations: parsed.durations || {},
+function resizeImageFileToBlob(file: File, maxWidth = 1600, quality = 0.85): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxWidth / img.width);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        URL.revokeObjectURL(url);
+        return reject(new Error("Could not get canvas context"));
+      }
+      // White background useful for packaging labels with transparency
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob((blob) => {
+        URL.revokeObjectURL(url);
+        if (!blob) return reject(new Error("Failed to create blob"));
+        resolve(blob);
+      }, "image/jpeg", quality);
     };
-  } catch (error) {
-    console.error('Failed to load messages from localStorage:', error);
-    return { messages: [], durations: {} };
-  }
-};
-
-const saveMessagesToStorage = (messages: UIMessage[], durations: Record<string, number>) => {
-  if (typeof window === 'undefined') return;
-  try {
-    const data: StorageData = { messages, durations };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch (error) {
-    console.error('Failed to save messages to localStorage:', error);
-  }
-};
-
-export default function Chat() {
-  const [isClient, setIsClient] = useState(false);
-  const [durations, setDurations] = useState<Record<string, number>>({});
-  const welcomeMessageShownRef = useRef<boolean>(false);
-
-  const stored = typeof window !== 'undefined' ? loadMessagesFromStorage() : { messages: [], durations: {} };
-  const [initialMessages] = useState<UIMessage[]>(stored.messages);
-
-  const { messages, sendMessage, status, stop, setMessages } = useChat({
-    messages: initialMessages,
+    img.onerror = (e) => {
+      URL.revokeObjectURL(url);
+      reject(e);
+    };
+    img.src = url;
   });
+}
 
-  useEffect(() => {
-    setIsClient(true);
-    setDurations(stored.durations);
-    setMessages(stored.messages);
-  }, []);
+export default function Page() {
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [messages, setMessages] = useState<UIMessage[]>([
+    { id: `welcome-${Date.now()}`, role: "assistant", parts: [{ type: "text", text: "Hello — upload a label and I'll extract ingredients and run FSSAI checks." }] }
+  ]);
 
-  useEffect(() => {
-    if (isClient) {
-      saveMessagesToStorage(messages, durations);
+  async function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+
+    setLoading(true);
+
+    // Remove old OCR messages (IDs starting with ocr-)
+    setMessages(prev => prev.filter(m => !String(m.id).startsWith("ocr-")));
+
+    // Add temporary analyzing message:
+    const analyzingId = `ocr-analyzing-${Date.now()}`;
+    setMessages(prev => [...prev, { id: analyzingId, role: "assistant", parts: [{ type: "text", text: "📸 Analyzing image..." }] }]);
+
+    try {
+      // Client-side Resize (reduces upload size & avoids server sharp)
+      let blob: Blob = f;
+      try {
+        blob = await resizeImageFileToBlob(f, 1600, 0.85);
+      } catch {
+        blob = f;
+      }
+
+      const fd = new FormData();
+      // Use the original filename
+      fd.append("image", blob, f.name);
+
+      const res = await fetch("/api/chat", { method: "POST", body: fd });
+      const json = await res.json();
+
+      // remove analyzing message
+      setMessages(prev => prev.filter(m => m.id !== analyzingId));
+
+      if (!json.ok) {
+        setMessages(prev => [...prev, { id: `ocr-error-${Date.now()}`, role: "assistant", parts: [{ type: "text", text: `Error: ${json.error || 'unknown'}` }] }]);
+      } else {
+        // Append structured result to messages (pretty printing)
+        const pretty = typeof json.result === "string" ? json.result : JSON.stringify(json.result, null, 2);
+        setMessages(prev => [...prev, { id: `ocr-${Date.now()}`, role: "assistant", parts: [{ type: "text", text: pretty }] }]);
+      }
+    } catch (err: any) {
+      setMessages(prev => prev.filter(m => !String(m.id).startsWith("ocr-analyzing")));
+      setMessages(prev => [...prev, { id: `ocr-error-${Date.now()}`, role: "assistant", parts: [{ type: "text", text: `Upload failed: ${String(err.message || err)}` }] }]);
+    } finally {
+      setLoading(false);
+      if (fileRef.current) fileRef.current.value = "";
     }
-  }, [durations, messages, isClient]);
-
-  const handleDurationChange = (key: string, duration: number) => {
-    setDurations((prevDurations) => {
-      const newDurations = { ...prevDurations };
-      newDurations[key] = duration;
-      return newDurations;
-    });
-  };
-
-  useEffect(() => {
-    if (isClient && initialMessages.length === 0 && !welcomeMessageShownRef.current) {
-      const welcomeMessage: UIMessage = {
-        id: `welcome-${Date.now()}`,
-        role: "assistant",
-        parts: [
-          {
-            type: "text",
-            text: WELCOME_MESSAGE,
-          },
-        ],
-      };
-      setMessages([welcomeMessage]);
-      saveMessagesToStorage([welcomeMessage], {});
-      welcomeMessageShownRef.current = true;
-    }
-  }, [isClient, initialMessages.length, setMessages]);
-
-  const form = useForm<z.infer<typeof formSchema>>({
-    resolver: zodResolver(formSchema),
-    defaultValues: {
-      message: "",
-    },
-  });
-
-  function onSubmit(data: z.infer<typeof formSchema>) {
-    sendMessage({ text: data.message });
-    form.reset();
-  }
-
-  function clearChat() {
-    const newMessages: UIMessage[] = [];
-    const newDurations = {};
-    setMessages(newMessages);
-    setDurations(newDurations);
-    saveMessagesToStorage(newMessages, newDurations);
-    toast.success("Chat cleared");
   }
 
   return (
-    <div className="flex h-screen items-center justify-center font-sans dark:bg-black">
-      <main className="w-full dark:bg-black h-screen relative">
-        <div className="fixed top-0 left-0 right-0 z-50 bg-linear-to-b from-background via-background/50 to-transparent dark:bg-black overflow-visible pb-16">
-          <div className="relative overflow-visible">
-            <ChatHeader>
-              <ChatHeaderBlock />
-              <ChatHeaderBlock className="justify-center items-center">
-                <Avatar
-                  className="size-8 ring-1 ring-primary"
-                >
-                  <AvatarImage src="/logo.png" />
-                  <AvatarFallback>
-                    <Image src="/logo.png" alt="Logo" width={36} height={36} />
-                  </AvatarFallback>
-                </Avatar>
-                <p className="tracking-tight">Chat with {AI_NAME}</p>
-              </ChatHeaderBlock>
-              <ChatHeaderBlock className="justify-end">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="cursor-pointer"
-                  onClick={clearChat}
-                >
-                  <Plus className="size-4" />
-                  {CLEAR_CHAT_TEXT}
-                </Button>
-              </ChatHeaderBlock>
-            </ChatHeader>
-          </div>
-        </div>
-        <div className="h-screen overflow-y-auto px-5 py-4 w-full pt-[88px] pb-[150px]">
-          <div className="flex flex-col items-center justify-end min-h-full">
-            {isClient ? (
-              <>
-                <MessageWall messages={messages} status={status} durations={durations} onDurationChange={handleDurationChange} />
-                {status === "submitted" && (
-                  <div className="flex justify-start max-w-3xl w-full">
-                    <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="flex justify-center max-w-2xl w-full">
-                <Loader2 className="size-4 animate-spin text-muted-foreground" />
-              </div>
-            )}
-          </div>
-        </div>
-        <div className="fixed bottom-0 left-0 right-0 z-50 bg-linear-to-t from-background via-background/50 to-transparent dark:bg-black overflow-visible pt-13">
-          <div className="w-full px-5 pt-5 pb-1 items-center flex justify-center relative overflow-visible">
-            <div className="message-fade-overlay" />
-            <div className="max-w-3xl w-full">
-              <form id="chat-form" onSubmit={form.handleSubmit(onSubmit)}>
-                <FieldGroup>
-                  <Controller
-                    name="message"
-                    control={form.control}
-                    render={({ field, fieldState }) => (
-                      <Field data-invalid={fieldState.invalid}>
-                        <FieldLabel htmlFor="chat-form-message" className="sr-only">
-                          Message
-                        </FieldLabel>
-                        <div className="relative h-13">
-                          <Input
-                            {...field}
-                            id="chat-form-message"
-                            className="h-15 pr-15 pl-5 bg-card rounded-[20px]"
-                            placeholder="Type your message here..."
-                            disabled={status === "streaming"}
-                            aria-invalid={fieldState.invalid}
-                            autoComplete="off"
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" && !e.shiftKey) {
-                                e.preventDefault();
-                                form.handleSubmit(onSubmit)();
-                              }
-                            }}
-                          />
-                          {(status == "ready" || status == "error") && (
-                            <Button
-                              className="absolute right-3 top-3 rounded-full"
-                              type="submit"
-                              disabled={!field.value.trim()}
-                              size="icon"
-                            >
-                              <ArrowUp className="size-4" />
-                            </Button>
-                          )}
-                          {(status == "streaming" || status == "submitted") && (
-                            <Button
-                              className="absolute right-2 top-2 rounded-full"
-                              size="icon"
-                              onClick={() => {
-                                stop();
-                              }}
-                            >
-                              <Square className="size-4" />
-                            </Button>
-                          )}
-                        </div>
-                      </Field>
-                    )}
-                  />
-                </FieldGroup>
-              </form>
+    <div style={{ padding: 32, maxWidth: 900, margin: "0 auto" }}>
+      <h2>Ingredient OCR + FSSAI Check</h2>
+
+      <div style={{ margin: "16px 0" }}>
+        <input ref={fileRef} type="file" accept="image/*" onChange={onFileChange} />
+        {loading && <div style={{ marginTop: 8 }}>Processing…</div>}
+      </div>
+
+      <div>
+        {messages.map((m) => (
+          <div key={String(m.id)} style={{ background: "#f3f4f6", padding: 12, borderRadius: 8, marginBottom: 10, whiteSpace: "pre-wrap" }}>
+            <strong>{m.role === "assistant" ? "Bot" : m.role}</strong>
+            <div style={{ marginTop: 6 }}>
+              {m.parts?.map((p, i) => <div key={i}>{(p as any).text}</div>)}
             </div>
           </div>
-          <div className="w-full px-5 py-3 items-center flex justify-center text-xs text-muted-foreground">
-            © {new Date().getFullYear()} {OWNER_NAME}&nbsp;<Link href="/terms" className="underline">Terms of Use</Link>&nbsp;Powered by&nbsp;<Link href="https://ringel.ai/" className="underline">Ringel.AI</Link>
-          </div>
-        </div>
-      </main>
-    </div >
+        ))}
+      </div>
+    </div>
   );
 }
