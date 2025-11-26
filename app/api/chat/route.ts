@@ -1,14 +1,10 @@
-// ============================================================
-//  /app/api/chat/route.ts — FINAL WORKING & STABLE
-// ============================================================
-
 import {
-  streamText,
-  UIMessage,
-  convertToModelMessages,
-  stepCountIs,
-  createUIMessageStream,
-  createUIMessageStreamResponse
+    streamText,
+    UIMessage,
+    convertToModelMessages,
+    stepCountIs,
+    createUIMessageStream,
+    createUIMessageStreamResponse
 } from "ai";
 
 import { MODEL } from "@/config";
@@ -17,194 +13,145 @@ import { isContentFlagged } from "@/lib/moderation";
 import { webSearch } from "./tools/web-search";
 import { vectorDatabaseSearch } from "./tools/search-vector-database";
 
-// Required for file uploads
-export const runtime = "nodejs";
 export const maxDuration = 30;
 
 export async function POST(req: Request) {
-  const contentType = req.headers.get("content-type") || "";
 
-  // ========================================================================
-  //  📸 IMAGE MODE (Multipart form-data)
-  // ========================================================================
-  if (contentType.includes("multipart/form-data")) {
-    const OpenAI = (await import("openai")).default;
+    const contentType = req.headers.get("content-type") || "";
 
-    const client = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY!
-    });
+    // ======================================================
+    // 📸 CASE 1 — IMAGE UPLOAD
+    // ======================================================
+    if (contentType.includes("multipart/form-data")) {
 
-    const fd = await req.formData();
-    const file = fd.get("image") as File | null;
+        const OpenAI = (await import("openai")).default;
+        const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-    if (!file) {
-      return Response.json({ response: "⚠️ No image uploaded." });
-    }
+        const formData = await req.formData();
+        const file = formData.get("image") as File;
 
-    // -- Convert File → Base64 ---------------------------------------------
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
+        if (!file) {
+            return Response.json({ response: "No image found." });
+        }
 
-    // ======================================================================
-    // 1) OCR — Robust Ingredient Extraction
-    // ======================================================================
-    const ocr = await client.responses.create({
-      model: "gpt-4o-mini",
-      input: `
-You are an OCR expert. Extract the FULL ingredient section from this food label.
+        // Convert uploaded image → Base64 data URL
+        const buffer = Buffer.from(await file.arrayBuffer());
+        const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
-CRITICAL RULES:
-- ALWAYS try your best. If blurry, extract what is readable.
-- Return comma-separated ingredients.
-- If "CONTAINS" or "MAY CONTAIN" appear, include them.
-- Do NOT return "NOT_FOUND" unless there is ZERO readable text.
-- Do NOT add commentary.
-- Only output ingredient text.
+        // ======================================================
+        // 🔍 1) Extract Ingredient List INTELLIGENTLY
+        // ======================================================
+        const extractRes = await client.responses.create({
+            model: "gpt-4.1-mini",
+            input: `
+You are a food-label OCR expert.
+
+From the image below, extract the INGREDIENT LIST if it exists.
+
+Rules:
+- Return ONLY the ingredient list (comma or line separated).
+- Ignore nutrition tables, calories, barcode text, slogans.
+- If the label has "CONTAINS" or "MAY CONTAIN", ALSO extract them.
+- If no explicit "Ingredients:" header exists, detect ingredient-like text.
+- Remove non-food text.
+- Clean and normalize the output.
+
+If nothing resembles ingredients, return: "No ingredients found."
 
 <image>${dataUrl}</image>
 `
-    });
+        });
 
-    const extractedRaw = ocr.output_text?.trim() || "";
-    if (!extractedRaw || extractedRaw.length < 3) {
-      return Response.json({
-        response: "⚠️ Could not detect ingredients. Try a clearer image."
-      });
-    }
+        const extracted = extractRes.output_text || "No ingredients found.";
 
-    const extracted = extractedRaw.replace(/\n+/g, " ").trim();
+        // ======================================================
+        // 🧪 2) Analyze Using FSSAI Logic
+        // ======================================================
+        const analyzeRes = await client.responses.create({
+            model: "gpt-4.1-mini",
+            input: `
+You are an Indian FSSAI Additive Analyzer.
 
-    // ======================================================================
-    // 2) SAFETY ANALYSIS (GPT returns JSON by prompt discipline)
-    // ======================================================================
-    const analysis = await client.responses.create({
-      model: "gpt-4.1-mini",
-      input: `
-Return ONLY valid JSON. No markdown. No commentary.
 
-JSON STRUCTURE:
-{
-  "ingredients": [
-    { "name": "", "status": "", "reason": "" }
-  ],
-  "summary": "",
-  "overall_score": 0
-}
 
-Allowed "status" values:
-- safe
-- caution
-- harmful
-- banned
-- kid-sensitive
-
-Analyze the following ingredients using Indian FSSAI rules:
+Given these extracted ingredients:
 
 ${extracted}
 
-Return ONLY JSON.
+Classify each into:
+- SAFE  
+- HARMFUL  
+- BANNED (FSSAI)  
+- KID-SENSITIVE  
+
+Return results in clear bullet points with emojis:
+🟢 Safe  
+🟡 Caution  
+🔴 Harmful  
+⛔ Banned  
+👶 Kid-sensitive  
 `
-    });
+        });
 
-    let parsed;
-    try {
-      parsed = JSON.parse(analysis.output_text || "{}");
-    } catch (err) {
-      return Response.json({
-        response: "⚠️ Could not format the safety results. Try another image."
-      });
-    }
+        const analysis = analyzeRes.output_text || "Could not analyze ingredients.";
 
-    // ======================================================================
-    // 3) BEAUTIFUL TABLE OUTPUT
-    // ======================================================================
-    const rows = parsed.ingredients
-      .map((i: any) => {
-        const emoji =
-          i.status === "safe"
-            ? "🟢"
-            : i.status === "caution"
-            ? "🟡"
-            : i.status === "kid-sensitive"
-            ? "👶"
-            : i.status === "harmful"
-            ? "🔴"
-            : "⛔";
-
-        return `| ${i.name} | ${emoji} ${i.status.toUpperCase()} | ${i.reason} |`;
-      })
-      .join("\n");
-
-    const table = `
-| Ingredient | Status | Reason |
-|-----------|--------|--------|
-${rows}
-`;
-
-    // ======================================================================
-    // 4) FINAL RESPONSE
-    // ======================================================================
-    return Response.json({
-      response: `
-📸 **Extracted Ingredients:**  
+        return Response.json({
+            response:
+`📸 **Extracted Ingredients:**  
 ${extracted}
 
-🧪 **FSSAI Safety Evaluation (India)**  
-${table}
+🔍 **FSSAI Safety Analysis:**  
+${analysis}`
+        });
+    }
 
-⭐ **Summary:**  
-${parsed.summary}
+    // ======================================================
+    // 💬 CASE 2 — STANDARD CHAT MODE
+    // ======================================================
+    const { messages }: { messages: UIMessage[] } = await req.json();
 
-📊 **Overall Score:** ${parsed.overall_score}/10
-`
-    });
-  }
+    const latest = messages.filter(m => m.role === "user").pop();
 
-  // ========================================================================
-  //  💬 NORMAL TEXT CHAT MODE
-  // ========================================================================
-  const { messages }: { messages: UIMessage[] } = await req.json();
-  const latest = messages.filter((m) => m.role === "user").pop();
+    if (latest) {
+        const textParts = latest.parts
+            .filter(p => p.type === "text")
+            .map(p => ("text" in p ? p.text : ""))
+            .join("");
 
-  // Moderation
-  if (latest) {
-    const content =
-      latest.parts
-        .filter((p) => p.type === "text")
-        .map((p: any) => p.text)
-        .join("") || "";
+        const moderation = await isContentFlagged(textParts);
 
-    const moderation = await isContentFlagged(content);
+        if (moderation.flagged) {
+            const stream = createUIMessageStream({
+                execute({ writer }) {
+                    const id = "blocked";
+                    writer.write({ type: "start" });
+                    writer.write({ type: "text-start", id });
+                    writer.write({
+                        type: "text-delta",
+                        id,
+                        delta: moderation.denialMessage || "Message blocked."
+                    });
+                    writer.write({ type: "text-end", id });
+                    writer.write({ type: "finish" });
+                }
+            });
 
-    if (moderation.flagged) {
-      const stream = createUIMessageStream({
-        execute({ writer }) {
-          writer.write({ type: "start" });
-          writer.write({ type: "text-start", id: "blocked" });
-          writer.write({
-            type: "text-delta",
-            id: "blocked",
-            delta: moderation.denialMessage || "Message blocked."
-          });
-          writer.write({ type: "text-end", id: "blocked" });
-          writer.write({ type: "finish" });
+            return createUIMessageStreamResponse({ stream });
         }
-      });
-
-      return createUIMessageStreamResponse({ stream });
     }
-  }
 
-  // Normal chat
-  const result = streamText({
-    model: MODEL,
-    system: SYSTEM_PROMPT,
-    messages: convertToModelMessages(messages),
-    tools: { webSearch, vectorDatabaseSearch },
-    stopWhen: stepCountIs(10)
-  });
+    // ======================================================
+    // 🤖 Normal Streaming Chat
+    // ======================================================
+    const result = streamText({
+        model: MODEL,
+        system: SYSTEM_PROMPT,
+        messages: convertToModelMessages(messages),
+        tools: { webSearch, vectorDatabaseSearch },
+        stopWhen: stepCountIs(10)
+    });
 
-  return result.toUIMessageStreamResponse({
-    sendReasoning: true
-  });
+    return result.toUIMessageStreamResponse({
+        sendReasoning: true
+    });
 }
