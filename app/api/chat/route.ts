@@ -1,3 +1,5 @@
+export const runtime = "nodejs"; // IMPORTANT: enables sharp
+
 import {
   streamText,
   UIMessage,
@@ -12,6 +14,7 @@ import { SYSTEM_PROMPT } from "@/prompts";
 import { isContentFlagged } from "@/lib/moderation";
 import { webSearch } from "./tools/web-search";
 import { vectorDatabaseSearch } from "./tools/search-vector-database";
+
 import sharp from "sharp";
 
 export const maxDuration = 30;
@@ -33,10 +36,10 @@ export async function POST(req: Request) {
       return Response.json({ response: "No image uploaded." });
     }
 
-    // Convert to buffer
+    // -------- Convert to Node.js Buffer --------
     const buffer = Buffer.from(await file.arrayBuffer());
 
-    // 👍 Gentle improvement (NO format change)
+    // -------- Enhance image safely (no format conversion) --------
     let enhanced = buffer;
     try {
       enhanced = await sharp(buffer)
@@ -48,28 +51,30 @@ export async function POST(req: Request) {
       enhanced = buffer;
     }
 
+    // -------- Convert to DataURL for OpenAI Vision --------
     const dataUrl = `data:${file.type};base64,${enhanced.toString("base64")}`;
 
-    // --- OCR ---
+    // -------- OCR: Extract Ingredients --------
     const extractRes = await client.responses.create({
       model: "gpt-4.1-mini",
       input: `
-You are an OCR expert. Extract the ingredient list OR any text that resembles ingredients.
-Return plain text only, no explanations.
+Extract ONLY the ingredients or anything that looks like an ingredient list.
+Return plain text only.
 
 <image>${dataUrl}</image>
 `
     });
 
-    const extracted = extractRes.output_text?.trim() || "Could not read ingredients.";
+    const extracted =
+      extractRes.output_text?.trim() || "Could not read ingredients.";
 
-    // --- FSSAI Analysis ---
+    // -------- FSSAI Analysis --------
     const analyzeRes = await client.responses.create({
       model: "gpt-4.1-mini",
       input: `
-You are an Indian FSSAI Additive Analyzer.
-Analyze the following ingredients:
+You are an Indian FSSAI Additive Evaluator.
 
+Analyze the following ingredients:
 ${extracted}
 
 Classify each item into:
@@ -78,11 +83,11 @@ Classify each item into:
 - BANNED
 - KID-SENSITIVE
 
-Return neat bullet points + final safety score out of 10.
+Return neat bullet points and give a final safety score out of 10.
 `
     });
 
-    const analysis = analyzeRes.output_text || "Could not analyze.";
+    const analysis = analyzeRes.output_text || "Could not analyze ingredients.";
 
     return Response.json({
       response:
@@ -92,7 +97,7 @@ Return neat bullet points + final safety score out of 10.
   }
 
   // ======================================================
-  // 💬 CASE 2 — NORMAL CHAT
+  // 💬 CASE 2 — NORMAL TEXT CHAT
   // ======================================================
   const { messages }: { messages: UIMessage[] } = await req.json();
 
@@ -126,14 +131,12 @@ Return neat bullet points + final safety score out of 10.
     }
   }
 
+  // -------- Normal chat mode --------
   const result = streamText({
     model: MODEL,
     system: SYSTEM_PROMPT,
     messages: convertToModelMessages(messages),
-    tools: {
-      webSearch,
-      vectorDatabaseSearch
-    },
+    tools: { webSearch, vectorDatabaseSearch },
     stopWhen: stepCountIs(10)
   });
 
