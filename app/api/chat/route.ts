@@ -12,8 +12,6 @@ import { SYSTEM_PROMPT } from "@/prompts";
 import { isContentFlagged } from "@/lib/moderation";
 import { webSearch } from "./tools/web-search";
 import { vectorDatabaseSearch } from "./tools/search-vector-database";
-
-// ---- NEW: sharp for image enhancement ----
 import sharp from "sharp";
 
 export const maxDuration = 30;
@@ -21,9 +19,9 @@ export const maxDuration = 30;
 export async function POST(req: Request) {
   const contentType = req.headers.get("content-type") || "";
 
-  // -------------------------------------------------
-  //  📸 CASE 1 — IMAGE UPLOAD WITH ENHANCEMENT
-  // -------------------------------------------------
+  // ======================================================
+  // 📸 CASE 1 — IMAGE UPLOAD
+  // ======================================================
   if (contentType.includes("multipart/form-data")) {
     const OpenAI = (await import("openai")).default;
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
@@ -35,61 +33,67 @@ export async function POST(req: Request) {
       return Response.json({ response: "No image uploaded." });
     }
 
-    // Read image → buffer
+    // Convert to buffer
     const buffer = Buffer.from(await file.arrayBuffer());
 
-    // 🔥 ENHANCE IMAGE: upscale + sharpen + increase contrast
-    const enhanced = await sharp(buffer)
-      .resize({ width: 1600 })        // upscale small labels
-      .sharpen()                      // crisp edges
-      .normalize()                    // improve contrast
-      .toBuffer();
+    // 👍 Gentle improvement (NO format change)
+    let enhanced = buffer;
+    try {
+      enhanced = await sharp(buffer)
+        .rotate()
+        .sharpen(0.4)
+        .normalize()
+        .toBuffer();
+    } catch (err) {
+      enhanced = buffer;
+    }
 
     const dataUrl = `data:${file.type};base64,${enhanced.toString("base64")}`;
 
-    // ---------------- OCR ----------------
+    // --- OCR ---
     const extractRes = await client.responses.create({
       model: "gpt-4.1-mini",
       input: `
-Extract ONLY the ingredient list text.
-Ignore calories & nutrition table.
-Return plain text.
+You are an OCR expert. Extract the ingredient list OR any text that resembles ingredients.
+Return plain text only, no explanations.
 
 <image>${dataUrl}</image>
 `
     });
 
-    const extracted =
-      extractRes.output_text?.trim() || "Could not read ingredients.";
+    const extracted = extractRes.output_text?.trim() || "Could not read ingredients.";
 
-    // ---------------- ANALYSIS ----------------
+    // --- FSSAI Analysis ---
     const analyzeRes = await client.responses.create({
       model: "gpt-4.1-mini",
       input: `
 You are an Indian FSSAI Additive Analyzer.
-Classify each ingredient into:
+Analyze the following ingredients:
+
+${extracted}
+
+Classify each item into:
 - SAFE
 - HARMFUL
 - BANNED
 - KID-SENSITIVE
 
-Give short bullet points.
-
-Ingredients:
-${extracted}
+Return neat bullet points + final safety score out of 10.
 `
     });
 
-    const analysis = analyzeRes.output_text || "No analysis.";
+    const analysis = analyzeRes.output_text || "Could not analyze.";
 
     return Response.json({
-      response: `📸 **Extracted Ingredients:**\n${extracted}\n\n🔍 **FSSAI Safety Analysis:**\n${analysis}`
+      response:
+        `📸 **Extracted Ingredients:**\n${extracted}\n\n` +
+        `🔍 **FSSAI Safety Analysis:**\n${analysis}`
     });
   }
 
-  // -------------------------------------------------
-  // 💬 CASE 2 — NORMAL TEXT CHAT
-  // -------------------------------------------------
+  // ======================================================
+  // 💬 CASE 2 — NORMAL CHAT
+  // ======================================================
   const { messages }: { messages: UIMessage[] } = await req.json();
 
   const latest = messages.filter((m) => m.role === "user").pop();
@@ -122,12 +126,14 @@ ${extracted}
     }
   }
 
-  // Normal streaming chat
   const result = streamText({
     model: MODEL,
     system: SYSTEM_PROMPT,
     messages: convertToModelMessages(messages),
-    tools: { webSearch, vectorDatabaseSearch },
+    tools: {
+      webSearch,
+      vectorDatabaseSearch
+    },
     stopWhen: stepCountIs(10)
   });
 
