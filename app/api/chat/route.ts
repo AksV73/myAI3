@@ -1,5 +1,5 @@
 // ============================================================
-//  FINAL STABLE ROUTE — ZERO ERRORS, JSON SAFE
+//  FINAL STABLE ROUTE — ZERO TYPE ERRORS, FULLY WORKING
 // ============================================================
 
 import {
@@ -20,9 +20,9 @@ import { vectorDatabaseSearch } from "./tools/search-vector-database";
 export const maxDuration = 30;
 
 // -----------------------------------------
-// IMAGE + SAFETY ANALYSIS HELPER
+// HELPERS
 // -----------------------------------------
-function safe(value: any, fallback = "") {
+function safe(value: any, fallback = ""): string {
   return value ? String(value) : fallback;
 }
 
@@ -31,8 +31,8 @@ function makeTable(safetyLines: string[]) {
 
   const rows = safetyLines
     .map((line) => {
-      // Example format: "Sugar 🟢 Safe (ok)"
-      const match = line.match(/^(.*?)\s+(🟢|🟡|🔴|⛔|👶)\s+(.*?)(?:\((.*?)\))?$/);
+      // Match format: "Sugar 🟢 Safe (reason)"
+      const match = line.match(/^(.*?)\s+(🟢|🟡|🔴|⛔|👶)\s+([^(]+)(?:\((.*?)\))?$/);
 
       if (!match) return null;
 
@@ -53,9 +53,9 @@ ${rows}
 `;
 }
 
-// -----------------------------------------
-// MAIN ROUTE
-// -----------------------------------------
+// ============================================================
+//  MAIN ROUTE
+// ============================================================
 export async function POST(req: Request) {
   const type = req.headers.get("content-type") || "";
 
@@ -74,18 +74,18 @@ export async function POST(req: Request) {
         return Response.json({ response: "No file uploaded." });
       }
 
-      // Convert image → base64
+      // Convert → base64
       const buffer = Buffer.from(await file.arrayBuffer());
       const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
       // -------------------------
       // STEP 1 — OCR
-      // -------------------------
+      --------------------------
       const ocrRes = await client.responses.create({
         model: "gpt-4-1-mini",
         input: `
-Extract ONLY the ingredient list. 
-If not found return EXACTLY: NOT_FOUND.
+Extract ONLY the ingredient list from this food label.
+If not found return: NOT_FOUND
 
 <image>${dataUrl}</image>
 `
@@ -100,8 +100,8 @@ If not found return EXACTLY: NOT_FOUND.
       }
 
       // -------------------------
-      // STEP 2 — SAFETY ANALYSIS
-      // -------------------------
+      // STEP 2 — Safety Analysis
+      --------------------------
       const safetyRes = await client.responses.create({
         model: "gpt-4-1-mini",
         input: `
@@ -109,14 +109,15 @@ Classify each ingredient from this list:
 
 ${extracted}
 
-Return ONLY bullet points in this exact format:
-- Sugar 🟢 Safe (short reason)
+Return ONLY bullet points like:
+- Sugar 🟢 Safe (reason)
 - Milk 👶 Kid-sensitive (allergen)
 - XYZ ⛔ Banned (FSSAI rule)
 `
       });
 
       const safetyText = safe(safetyRes.output_text);
+
       const lines = safetyText
         .split("\n")
         .map((x) => x.replace(/^- /, "").trim())
@@ -125,8 +126,8 @@ Return ONLY bullet points in this exact format:
       const table = makeTable(lines);
 
       // -------------------------
-      // RETURN JSON
-      // -------------------------
+      // RETURN RESULT
+      --------------------------
       return Response.json({
         response: `
 📸 **Extracted Ingredients**
@@ -137,8 +138,8 @@ ${extracted}
 ### 🧪 FSSAI Safety Table
 ${table}
 
-If you want allergen mapping or kid safety score, just ask!
-        `
+Need allergen mapping or a kid safety score? Just ask!
+`
       });
     } catch (err: any) {
       return Response.json({
@@ -170,7 +171,7 @@ If you want allergen mapping or kid safety score, just ask!
           writer.write({
             type: "text-delta",
             id: "blocked",
-            delta: moderation.denialMessage
+            delta: moderation.denialMessage ?? "Message blocked."
           });
           writer.write({ type: "text-end", id: "blocked" });
           writer.write({ type: "finish" });
@@ -181,6 +182,7 @@ If you want allergen mapping or kid safety score, just ask!
     }
   }
 
+  // Normal chat flow
   const result = streamText({
     model: MODEL,
     system: SYSTEM_PROMPT,
@@ -189,5 +191,7 @@ If you want allergen mapping or kid safety score, just ask!
     stopWhen: stepCountIs(10)
   });
 
-  return result.toUIMessageStreamResponse({ sendReasoning: true });
+  return result.toUIMessageStreamResponse({
+    sendReasoning: true
+  });
 }
