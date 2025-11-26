@@ -13,18 +13,11 @@ import { isContentFlagged } from "@/lib/moderation";
 import { webSearch } from "./tools/web-search";
 import { vectorDatabaseSearch } from "./tools/search-vector-database";
 
-
-
 export const maxDuration = 30;
 
 export async function POST(req: Request) {
 
-
     const contentType = req.headers.get("content-type") || "";
-
-
-
-
 
     // ======================================================
     // 📸 CASE 1 — IMAGE UPLOAD
@@ -81,30 +74,6 @@ You are an Indian FSSAI Additive Analyzer.
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 Given these extracted ingredients:
 
 ${extracted}
@@ -126,45 +95,9 @@ Return results in clear bullet points with emojis:
 
         const analysis = analyzeRes.output_text || "Could not analyze ingredients.";
 
-
-
-
-
-
-
-
         return Response.json({
             response:
 `📸 **Extracted Ingredients:**  
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 ${extracted}
 
 🔍 **FSSAI Safety Analysis:**  
@@ -218,38 +151,7 @@ ${analysis}`
         stopWhen: stepCountIs(10)
     });
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     return result.toUIMessageStreamResponse({
         sendReasoning: true
     });
+}
