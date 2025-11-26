@@ -1,8 +1,5 @@
-// =====================================================================
-// BACKEND — Cosmetic OCR + Ingredient Safety Analysis (Vercel Safe)
-// =====================================================================
-
-export const runtime = "nodejs"; // sharp only works in node runtime
+// /app/api/chat/route.ts
+export const runtime = "nodejs";
 export const preferredRegion = "bom1";
 
 import OpenAI from "openai";
@@ -28,53 +25,74 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
 export const maxDuration = 30;
 
+/**
+ * Try to extract a JSON substring from arbitrary model text.
+ * - Look for fenced code blocks first (```json ... ``` or ``` ... ```)
+ * - Otherwise find the first top-level '{ ... }' block.
+ */
+function extractJSON(text: string | undefined): any | null {
+  if (!text) return null;
+  // 1) Try fenced block ```json ... ``` or ```
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  let candidate = fenceMatch ? fenceMatch[1] : text;
+
+  // 2) Try to find the first JSON object {...}
+  const objMatch = candidate.match(/\{[\s\S]*\}$/m) || candidate.match(/\{[\s\S]*?\}/m);
+  if (!objMatch) return null;
+
+  const jsonStr = objMatch[0];
+
+  try {
+    return JSON.parse(jsonStr);
+  } catch (e) {
+    // Attempt to repair common issues: replace smart quotes and trailing commas
+    const repaired = jsonStr
+      .replace(/[“”]/g, '"')
+      .replace(/,(\s*[}\]])/g, "$1"); // remove trailing commas
+    try {
+      return JSON.parse(repaired);
+    } catch (e2) {
+      return null;
+    }
+  }
+}
+
 export async function POST(req: Request) {
   const contentType = req.headers.get("content-type") || "";
 
-  // =====================================================================
-  // 📸 IMAGE MODE (OCR + Analysis)
-  // =====================================================================
+  // ---------- IMAGE MODE: OCR + Analysis ----------
   if (contentType.includes("multipart/form-data")) {
     const formData = await req.formData();
     const file = formData.get("image") as File | null;
 
     if (!file) {
-      return Response.json(
-        { response: "No image uploaded." },
-        { status: 400 }
-      );
+      return Response.json({ ok: false, error: "No image uploaded." }, { status: 400 });
     }
 
-    // Convert File → Buffer (safe in Vercel)
-    const arr = new Uint8Array(await file.arrayBuffer());
-    const buffer = Buffer.from(arr);
+    // Convert File => Node Buffer safely
+    const ab = await file.arrayBuffer();
+    const u8 = new Uint8Array(ab);
+    const nodeBuffer = Buffer.from(u8);
 
-    // -----------------------------------------------------------
-    // ⭐ FIX: SHARP TYPE CAST (THE ONLY CHANGE YOU NEEDED)
-    // -----------------------------------------------------------
-    let processed = buffer;
+    // Use sharp safely in Vercel + cast to any to avoid typing error
+    let processedBuffer = nodeBuffer;
     try {
-      processed = await (sharp as any)(buffer as any)
-        .rotate()
-        .toBuffer();
-    } catch (e) {
-      processed = buffer;
+      processedBuffer = await (sharp as any)(nodeBuffer as any).rotate().toBuffer();
+    } catch (err) {
+      // fallback to original buffer
+      processedBuffer = nodeBuffer;
     }
 
-    const dataUrl = `data:${file.type};base64,${processed.toString("base64")}`;
+    const dataUrl = `data:${file.type};base64,${processedBuffer.toString("base64")}`;
 
-    // =====================================================================
-    // 🔍 OCR PROMPT
-    // =====================================================================
+    // ---------- OCR extraction ----------
     const ocrPrompt = `
-Extract ONLY the cosmetic ingredients from this product label.
+Extract ONLY the cosmetic ingredient list from this image.
 
 Rules:
-- Only the list after "Ingredients:"
-- No guesswork
-- No hallucinations
-- If text unreadable, return "UNREADABLE"
-
+- Return only the text that follows "Ingredients:" (or equivalent heading).
+- Do NOT add explanations.
+- If you cannot locate or read an ingredient list, reply: UNREADABLE
 <image>${dataUrl}</image>
 `;
 
@@ -84,68 +102,104 @@ Rules:
       input: ocrPrompt
     });
 
-    const extracted = ocrRes.output_text?.trim() || "UNREADABLE";
+    const ocrText = (ocrRes.output_text || "").trim();
 
-    // =====================================================================
-    // 🧪 SAFETY ANALYSIS (STRICT JSON)
-    // =====================================================================
+    if (!ocrText || ocrText.toUpperCase().includes("UNREADABLE")) {
+      return Response.json({
+        ok: true,
+        extracted: null,
+        message: "OCR could not extract a readable ingredient list from the image."
+      });
+    }
+
+    // Sanitize basic result
+    const extractedIngredients = ocrText;
+
+    // ---------- Analysis prompt (request JSON) ----------
     const analysisPrompt = `
 You are an Indian cosmetic ingredient safety evaluator.
 
-Analyze:
-
-"${extracted}"
-
-Return ONLY JSON (no text outside JSON):
+Input: the ingredient list below (one string).
+Produce STRICT JSON ONLY with this format:
 
 {
   "ingredients": [
-    { "name": "", "classification": "", "reason": "" }
+    { "name": "...", "classification": "...", "reason": "..." }
   ],
   "score": 0,
-  "summary": ""
+  "summary": "..."
 }
 
-Classification rules:
-SAFE
-IRRITANT
-RESTRICTED/BANNED
-PREGNANCY_UNSAFE
-KID_UNSAFE
-COMEDOGENIC
+Classification values: SAFE, IRRITANT, RESTRICTED/BANNED, PREGNANCY_UNSAFE, KID_UNSAFE, COMEDOGENIC
+
+Indian specifics:
+- Flag mercury/lead compounds as RESTRICTED/BANNED.
+- Hydroquinone: RESTRICTED/BANNED for OTC.
+- Parabens: mention "use with caution" rather than panic.
+- Phenoxyethanol: OK under 1% (mention if uncertain).
+- Fragrances: often IRRITANT.
+Return only JSON (no text outside).
+Ingredient list:
+"""${extractedIngredients}"""
 `;
 
     const analysisRes = await openai.responses.create({
       model: "gpt-4o-mini",
       temperature: 0,
-      max_output_tokens: 1600,
+      max_output_tokens: 1500,
       input: analysisPrompt
     });
 
-    let parsed;
-    try {
-      parsed = JSON.parse(analysisRes.output_text || "{}");
-    } catch {
-      parsed = {
-        ingredients: [],
-        score: 5,
-        summary: "Could not parse JSON output.",
-        raw: analysisRes.output_text
-      };
+    const analysisText = analysisRes.output_text || "";
+
+    // Try to extract JSON (robust)
+    let parsed = extractJSON(analysisText);
+
+    if (!parsed) {
+      // If model didn't give good JSON, attempt a fallback: ask again with a stricter instruction but include previous text
+      const repairPrompt = `
+The previous attempt returned this text:
+"""${analysisText}"""
+
+It didn't parse as JSON. Please REPLY WITH STRICT JSON in the exact format:
+
+{
+  "ingredients": [ { "name":"", "classification":"", "reason":"" } ],
+  "score": 0,
+  "summary": ""
+}
+`;
+      const repairRes = await openai.responses.create({
+        model: "gpt-4o-mini",
+        temperature: 0,
+        max_output_tokens: 1200,
+        input: repairPrompt
+      });
+      parsed = extractJSON(repairRes.output_text || "") || null;
     }
 
+    // Final fallback if still not parsable
+    if (!parsed) {
+      return Response.json({
+        ok: true,
+        extracted: extractedIngredients,
+        parsed: null,
+        message: "Could not parse analyzer JSON. See raw analyzer output.",
+        raw: analysisText
+      });
+    }
+
+    // Success
     return Response.json({
-      response: JSON.stringify(parsed, null, 2)
+      ok: true,
+      extracted: extractedIngredients,
+      analysis: parsed
     });
   }
 
-  // =====================================================================
-  // 💬 TEXT CHAT MODE (unchanged from your app)
-  // =====================================================================
-
+  // ---------- TEXT CHAT MODE ----------
   const { messages }: { messages: UIMessage[] } = await req.json();
   const latest = messages.filter((m) => m.role === "user").pop();
-
   if (latest) {
     const textParts =
       latest.parts
@@ -154,7 +208,6 @@ COMEDOGENIC
         .join("") || "";
 
     const moderation = await isContentFlagged(textParts);
-
     if (moderation.flagged) {
       const stream = createUIMessageStream({
         execute({ writer }) {
@@ -163,14 +216,12 @@ COMEDOGENIC
           writer.write({
             type: "text-delta",
             id: "blocked",
-            delta:
-              moderation.denialMessage || "Message blocked."
+            delta: moderation.denialMessage || "Message blocked"
           });
           writer.write({ type: "text-end", id: "blocked" });
           writer.write({ type: "finish" });
         }
       });
-
       return createUIMessageStreamResponse({ stream });
     }
   }
