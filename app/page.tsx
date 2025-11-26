@@ -9,30 +9,24 @@ import { Button } from "@/components/ui/button";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { useChat } from "@ai-sdk/react";
-
 import { ArrowUp, Loader2, Plus, Square } from "lucide-react";
 import { MessageWall } from "@/components/messages/message-wall";
-import { ChatHeader, ChatHeaderBlock } from "@/app/parts/chat-header";
+import { ChatHeader } from "@/app/parts/chat-header";
+import { ChatHeaderBlock } from "@/app/parts/chat-header";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-
 import { UIMessage } from "ai";
 import { useEffect, useState, useRef } from "react";
 import { AI_NAME, CLEAR_CHAT_TEXT, OWNER_NAME, WELCOME_MESSAGE } from "@/config";
-
 import Image from "next/image";
 import Link from "next/link";
 
-
-// -------------------------------
-// FORM SCHEMA
-// -------------------------------
 const formSchema = z.object({
-  message: z.string().min(1).max(2000),
+  message: z
+    .string()
+    .min(1, "Message cannot be empty.")
+    .max(2000, "Message must be at most 2000 characters.")
 });
 
-// -------------------------------
-// LOCAL STORAGE HELPERS
-// -------------------------------
 const STORAGE_KEY = "chat-messages";
 
 type StorageData = {
@@ -40,13 +34,12 @@ type StorageData = {
   durations: Record<string, number>;
 };
 
-const loadMessages = (): StorageData => {
+const loadMessages = () => {
   if (typeof window === "undefined") return { messages: [], durations: {} };
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") || {
-      messages: [],
-      durations: {},
-    };
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return { messages: [], durations: {} };
+    return JSON.parse(raw);
   } catch {
     return { messages: [], durations: {} };
   }
@@ -57,21 +50,16 @@ const saveMessages = (messages: UIMessage[], durations: Record<string, number>) 
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ messages, durations }));
 };
 
-
-// -------------------------------
-// COMPONENT
-// -------------------------------
 export default function Chat() {
   const [isClient, setIsClient] = useState(false);
   const welcomeRef = useRef(false);
 
   const stored = typeof window !== "undefined" ? loadMessages() : { messages: [], durations: {} };
-
-  const [durations, setDurations] = useState<Record<string, number>>(stored.durations);
+  const [durations, setDurations] = useState(stored.durations);
   const [initialMessages] = useState<UIMessage[]>(stored.messages);
 
   const { messages, sendMessage, status, stop, setMessages } = useChat({
-    messages: initialMessages,
+    messages: initialMessages
   });
 
   useEffect(() => {
@@ -84,26 +72,24 @@ export default function Chat() {
     if (isClient) saveMessages(messages, durations);
   }, [messages, durations, isClient]);
 
-  // WELCOME MESSAGE
+  // Welcome message
   useEffect(() => {
     if (!isClient || initialMessages.length !== 0 || welcomeRef.current) return;
 
-    const welcomeMessage: UIMessage = {
-      id: "welcome-" + Date.now(),
+    const welcome: UIMessage = {
+      id: `welcome-${Date.now()}`,
       role: "assistant",
-      parts: [{ type: "text", text: WELCOME_MESSAGE }],
+      parts: [{ type: "text", text: WELCOME_MESSAGE }]
     };
 
-    setMessages([welcomeMessage]);
-    saveMessages([welcomeMessage], {});
+    setMessages([welcome]);
+    saveMessages([welcome], {});
     welcomeRef.current = true;
   }, [isClient, initialMessages.length, setMessages]);
 
-
-  // FORM
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
-    defaultValues: { message: "" },
+    defaultValues: { message: "" }
   });
 
   function onSubmit(data: z.infer<typeof formSchema>) {
@@ -118,25 +104,23 @@ export default function Chat() {
     toast.success("Chat cleared");
   }
 
-
   return (
     <div className="flex h-screen items-center justify-center font-sans dark:bg-black">
       <main className="w-full dark:bg-black h-screen relative">
 
         {/* HEADER */}
-        <div className="fixed top-0 left-0 right-0 z-50 pb-16 bg-linear-to-b from-background via-background/50 to-transparent dark:bg-black">
+        <div className="fixed top-0 left-0 right-0 z-50 bg-linear-to-b from-background via-background/50 to-transparent dark:bg-black pb-16">
           <ChatHeader>
             <ChatHeaderBlock />
             <ChatHeaderBlock className="justify-center items-center">
               <Avatar className="size-8 ring-1 ring-primary">
                 <AvatarImage src="/logo.png" />
                 <AvatarFallback>
-                  <Image src="/logo.png" width={36} height={36} alt="logo" />
+                  <Image src="/logo.png" width={36} height={36} alt="Logo" />
                 </AvatarFallback>
               </Avatar>
               <p className="tracking-tight">Chat with {AI_NAME}</p>
             </ChatHeaderBlock>
-
             <ChatHeaderBlock className="justify-end">
               <Button variant="outline" size="sm" onClick={clearChat}>
                 <Plus className="size-4" />
@@ -146,9 +130,10 @@ export default function Chat() {
           </ChatHeader>
         </div>
 
-        {/* MESSAGES */}
+        {/* CHAT LOG */}
         <div className="h-screen overflow-y-auto px-5 py-4 w-full pt-[88px] pb-[150px]">
           <div className="flex flex-col items-center justify-end min-h-full">
+
             {isClient ? (
               <>
                 <MessageWall
@@ -156,39 +141,37 @@ export default function Chat() {
                   status={status}
                   durations={durations}
                   onDurationChange={(key, d) =>
-                    setDurations((prev: Record<string, number>) => ({
-                      ...prev,
-                      [key]: d,
-                    }))
+                    setDurations((prev) => ({ ...prev, [key]: d }))
                   }
                 />
 
-                {status === "submitted" && (
+                {(status === "submitted" || status === "streaming") && (
                   <div className="flex justify-start max-w-3xl w-full">
                     <Loader2 className="size-4 animate-spin text-muted-foreground" />
                   </div>
                 )}
               </>
             ) : (
-              <Loader2 className="animate-spin size-4 text-muted-foreground" />
+              <Loader2 className="size-4 animate-spin text-muted-foreground" />
             )}
           </div>
         </div>
 
         {/* INPUT AREA */}
         <div className="fixed bottom-0 left-0 right-0 z-50 pt-13 bg-linear-to-t from-background via-background/50 to-transparent dark:bg-black">
-
           <div className="w-full px-5 pt-5 pb-1 flex justify-center">
             <div className="max-w-3xl w-full">
 
-              <form onSubmit={form.handleSubmit(onSubmit)}>
+              <form id="chat-form" onSubmit={form.handleSubmit(onSubmit)}>
 
-                {/* IMAGE UPLOAD */}
+                {/* ========================= */}
+                {/* 📸 IMAGE UPLOAD - FIXED   */}
+                {/* ========================= */}
                 <input
                   type="file"
                   accept="image/*"
                   capture="environment"
-                  className="border p-2 rounded mb-3"
+                  className="border p-2 rounded mb-2"
                   onChange={async (e) => {
                     const file = e.target.files?.[0];
                     if (!file) return;
@@ -196,32 +179,42 @@ export default function Chat() {
                     const formData = new FormData();
                     formData.append("image", file);
 
-                    // temporary message
-                    setMessages((prev) => [
-                      ...prev,
-                      {
-                        id: "temp-" + Date.now(),
-                        role: "assistant",
-                        parts: [{ type: "text", text: "📸 Analyzing image…" }],
-                      },
-                    ]);
+                    // 1️⃣ Remove previous OCR messages
+                    setMessages((prev) =>
+                      prev.filter((m) => !m.id?.startsWith("ocr-"))
+                    );
 
+                    // 2️⃣ Add analyzing message
+                    const analyzing = {
+                      id: `ocr-analyzing-${Date.now()}`,
+                      role: "assistant",
+                      parts: [{ type: "text", text: "📸 Analyzing image…" }]
+                    };
+                    setMessages((prev) => [...prev, analyzing]);
+
+                    // 3️⃣ Send to backend
                     const res = await fetch("/api/chat", {
                       method: "POST",
-                      body: formData,
+                      body: formData
                     });
 
                     const data = await res.json();
 
-                    // final output message
-                    setMessages((prev) => [
-                      ...prev,
-                      {
-                        id: "ans-" + Date.now(),
-                        role: "assistant",
-                        parts: [{ type: "text", text: data.response }],
-                      },
-                    ]);
+                    // 4️⃣ Remove analyzing message
+                    setMessages((prev) =>
+                      prev.filter((m) => m.id !== analyzing.id)
+                    );
+
+                    // 5️⃣ Insert final OCR result
+                    const resultMsg = {
+                      id: `ocr-${Date.now()}`,
+                      role: "assistant",
+                      parts: [{ type: "text", text: data.response }]
+                    };
+                    setMessages((prev) => [...prev, resultMsg]);
+
+                    // 6️⃣ Reset input so user can upload same image again
+                    e.target.value = "";
                   }}
                 />
 
@@ -232,13 +225,16 @@ export default function Chat() {
                     control={form.control}
                     render={({ field, fieldState }) => (
                       <Field data-invalid={fieldState.invalid}>
-                        <FieldLabel className="sr-only">Message</FieldLabel>
+                        <FieldLabel htmlFor="chat-form-message" className="sr-only">
+                          Message
+                        </FieldLabel>
 
                         <div className="relative h-13">
                           <Input
                             {...field}
-                            placeholder="Type your message..."
+                            id="chat-form-message"
                             className="h-15 pr-15 pl-5 bg-card rounded-[20px]"
+                            placeholder="Type your message here..."
                             disabled={status === "streaming"}
                             autoComplete="off"
                             onKeyDown={(e) => {
@@ -251,10 +247,10 @@ export default function Chat() {
 
                           {(status === "ready" || status === "error") && (
                             <Button
-                              type="submit"
                               className="absolute right-3 top-3 rounded-full"
-                              size="icon"
+                              type="submit"
                               disabled={!field.value.trim()}
+                              size="icon"
                             >
                               <ArrowUp className="size-4" />
                             </Button>
@@ -279,11 +275,10 @@ export default function Chat() {
             </div>
           </div>
 
-          {/* FOOTER */}
           <div className="w-full px-5 py-3 text-xs text-muted-foreground flex justify-center">
-            © {new Date().getFullYear()} {OWNER_NAME} ·
-            <Link href="/terms" className="underline">&nbsp;Terms</Link> ·
-            Powered by&nbsp;<Link href="https://ringel.ai/" className="underline">Ringel.AI</Link>
+            © {new Date().getFullYear()} {OWNER_NAME}&nbsp;
+            <Link href="/terms" className="underline">Terms</Link>&nbsp;· Powered by&nbsp;
+            <Link href="https://ringel.ai/" className="underline">Ringel.AI</Link>
           </div>
 
         </div>
