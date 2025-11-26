@@ -1,5 +1,5 @@
 // ============================================================
-//  FINAL STABLE ROUTE — ZERO TYPE ERRORS, FULLY WORKING
+//  FINAL STABLE ROUTE — ZERO TYPE ERRORS
 // ============================================================
 
 import {
@@ -31,9 +31,7 @@ function makeTable(safetyLines: string[]) {
 
   const rows = safetyLines
     .map((line) => {
-      // Match format: "Sugar 🟢 Safe (reason)"
       const match = line.match(/^(.*?)\s+(🟢|🟡|🔴|⛔|👶)\s+([^(]+)(?:\((.*?)\))?$/);
-
       if (!match) return null;
 
       const name = match[1].trim();
@@ -60,7 +58,7 @@ export async function POST(req: Request) {
   const type = req.headers.get("content-type") || "";
 
   // ============================================================
-  // 📸 IMAGE UPLOAD MODE
+  // IMAGE UPLOAD MODE
   // ============================================================
   if (type.includes("multipart/form-data")) {
     try {
@@ -74,19 +72,16 @@ export async function POST(req: Request) {
         return Response.json({ response: "No file uploaded." });
       }
 
-      // Convert → base64
+      // convert to base64
       const buffer = Buffer.from(await file.arrayBuffer());
       const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
-      // -------------------------
       // STEP 1 — OCR
-      --------------------------
       const ocrRes = await client.responses.create({
         model: "gpt-4-1-mini",
         input: `
 Extract ONLY the ingredient list from this food label.
 If not found return: NOT_FOUND
-
 <image>${dataUrl}</image>
 `
       });
@@ -99,9 +94,7 @@ If not found return: NOT_FOUND
         });
       }
 
-      // -------------------------
-      // STEP 2 — Safety Analysis
-      --------------------------
+      // STEP 2 — FSSAI Safety Analysis
       const safetyRes = await client.responses.create({
         model: "gpt-4-1-mini",
         input: `
@@ -117,7 +110,6 @@ Return ONLY bullet points like:
       });
 
       const safetyText = safe(safetyRes.output_text);
-
       const lines = safetyText
         .split("\n")
         .map((x) => x.replace(/^- /, "").trim())
@@ -125,31 +117,24 @@ Return ONLY bullet points like:
 
       const table = makeTable(lines);
 
-      // -------------------------
-      // RETURN RESULT
-      --------------------------
       return Response.json({
         response: `
 📸 **Extracted Ingredients**
 ${extracted}
 
----
-
 ### 🧪 FSSAI Safety Table
 ${table}
 
-Need allergen mapping or a kid safety score? Just ask!
+Need allergen or kid safety score? Ask me!
 `
       });
     } catch (err: any) {
-      return Response.json({
-        response: `❌ Server error: ${err?.message || err}`
-      });
+      return Response.json({ response: `❌ Server error: ${err?.message}` });
     }
   }
 
   // ============================================================
-  // 💬 TEXT CHAT MODE
+  // CHAT MODE
   // ============================================================
   const { messages }: { messages: UIMessage[] } = await req.json();
   const latest = messages.filter((m) => m.role === "user").pop();
@@ -182,7 +167,6 @@ Need allergen mapping or a kid safety score? Just ask!
     }
   }
 
-  // Normal chat flow
   const result = streamText({
     model: MODEL,
     system: SYSTEM_PROMPT,
@@ -191,7 +175,5 @@ Need allergen mapping or a kid safety score? Just ask!
     stopWhen: stepCountIs(10)
   });
 
-  return result.toUIMessageStreamResponse({
-    sendReasoning: true
-  });
+  return result.toUIMessageStreamResponse({ sendReasoning: true });
 }
