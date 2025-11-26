@@ -1,124 +1,152 @@
 export const runtime = "nodejs";
 
-import {
-  streamText,
-  UIMessage,
-  convertToModelMessages,
-  stepCountIs,
-  createUIMessageStream,
-  createUIMessageStreamResponse
-} from "ai";
-
+import { NextRequest } from "next/server"; // if using Next 13+ edge, else use Request
+import sharp from "sharp";
+import { Buffer } from "buffer"; // Node Buffer
+import OpenAI from "openai";
+import { streamText, UIMessage, convertToModelMessages, stepCountIs, createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import { MODEL } from "@/config";
 import { SYSTEM_PROMPT } from "@/prompts";
 import { isContentFlagged } from "@/lib/moderation";
 import { webSearch } from "./tools/web-search";
 import { vectorDatabaseSearch } from "./tools/search-vector-database";
 
-import sharp from "sharp";
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
 export const maxDuration = 30;
 
 export async function POST(req: Request) {
   const contentType = req.headers.get("content-type") || "";
 
-  // ---------------------------------------------------------
-  // 📸 IMAGE UPLOAD MODE
-  // ---------------------------------------------------------
+  // ----- IMAGE UPLOAD FLOW -----
   if (contentType.includes("multipart/form-data")) {
-    const OpenAI = (await import("openai")).default;
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
-
     const formData = await req.formData();
-    const file = formData.get("image") as File;
-    if (!file) return Response.json({ response: "No image uploaded." });
+    const file = formData.get("image") as File | null;
+    if (!file) return new Response(JSON.stringify({ response: "No image provided" }), { status: 400 });
 
-    // --- TRUE BUFFER CREATION (NO TYPING ERRORS) ---
+    // create Node Buffer safely
     const ab = await file.arrayBuffer();
-    const buffer: Buffer = Buffer.from(new Uint8Array(ab));
+    const u8 = new Uint8Array(ab);
+    const buffer = Buffer.from(u8);
 
-    // --- IMAGE ENHANCEMENT WITH TYPING FIX ---
-    let enhanced: Buffer = buffer;
+    // Optional: small server-side enhancement (be conservative)
+    let enhancedBuffer = buffer;
     try {
-      enhanced = await (sharp as any)(buffer)
-        .rotate()
-        .sharpen(0.4)
+      enhancedBuffer = await sharp(buffer)
+        .rotate() // auto rotate
+        .resize({ width: 1600, withoutEnlargement: true })
+        .grayscale()
+        .sharpen()
         .normalize()
+        .jpeg({ quality: 82 })
         .toBuffer();
     } catch (err) {
-      enhanced = buffer; // safe fallback
+      enhancedBuffer = buffer; // fallback
     }
 
-    const dataUrl = `data:${file.type};base64,${enhanced.toString("base64")}`;
+    // convert to data-uri for the model
+    const dataUrl = `data:${file.type};base64,${enhancedBuffer.toString("base64")}`;
 
-    // --- OCR ---
-    const extractRes = await client.responses.create({
-      model: "gpt-4.1-mini",
-      input: `
-Extract ONLY the ingredient list.
-Return plain text only — no explanation.
+    // ---------- OCR step: ask model to extract ONLY ingredient list ----------
+    const extractPrompt = `
+You are an OCR assistant: EXTRACT ONLY the ingredient list from the supplied product label image.
+Return plain, comma-separated ingredients or newline-separated ingredients — nothing else.
+If you cannot find an "Ingredients" section, extract any text that looks like a list of ingredients.
 
 <image>${dataUrl}</image>
-`
+`;
+
+    const extractRes = await openai.responses.create({
+      model: "gpt-4.1-mini",
+      input: extractPrompt,
     });
 
-    const extracted = extractRes.output_text?.trim() || "Could not read ingredients.";
+    const extracted = (extractRes.output_text || "").trim();
 
-    // --- FSSAI ANALYSIS ---
-    const analyzeRes = await client.responses.create({
-      model: "gpt-4.1-mini",
-      input: `
-You are an Indian FSSAI Additive Evaluator.
+    // ---------- Analysis step: classify each ingredient using Indian rules ----------
+    // We use a strong system + analyzer prompt (see prompts/cosmetics-system.ts in repo)
+    const analysisPrompt = `
+You are an Indian cosmetics ingredient safety analyst.
 
-Analyze the following:
+Task:
+1) Parse the following ingredient list and produce a structured classification for each ingredient.
+2) For each ingredient, output:
+   - name (INCI if possible)
+   - classification: one of [SAFE, POTENTIALLY_IRRITATING, RESTRICTED/BANNED, PREGNANCY_UNSAFE, KID_UNSAFE, COMEDOGENIC]
+   - short reason (1 sentence)
+   - suggested caution (if any)
+3) At the end, provide an overall safety score (0-10) and a short recommendation for Indian users (skin type/humidity/usage tips).
+
+Indian specifics to follow:
+- Flag mercury compounds and lead compounds as BANNED.
+- Flag hydroquinone as RESTRICTED/BANNED (unless prescribed).
+- Parabens: SAFE in low concentrations but mention caution for sensitive users.
+- Phenoxyethanol: SAFE under 1%.
+- Formulate guidance on fragrances (common irritant in Indian climate).
+- For comedogenicity mention common listed oils (Cocos Nucifera / Coconut, Butyrospermum Parkii / Shea, etc.)
+- Mention pregnancy rules: retinoids, salicylic acid (high concentration), hydroquinone -> PREGNANCY_UNSAFE.
+
+Ingredient list:
 ${extracted}
 
-Classify each item as:
-- SAFE
-- HARMFUL
-- BANNED
-- KID-SENSITIVE
+Return only JSON with fields:
+{
+  "extracted": "...",
+  "items": [
+    { "name": "...", "classification": "...", "reason": "...", "caution": "..." }
+  ],
+  "score": 7.1,
+  "recommendation": "..."
+}
+`;
 
-Give bullet points + a safety score out of 10.
-`
+    const analysisRes = await openai.responses.create({
+      model: "gpt-4.1-mini",
+      input: analysisPrompt,
+      // temperature low for repeatability:
+      temperature: 0.0,
+      max_output_tokens: 1000,
     });
 
-    return Response.json({
-      response:
-        `📸 **Extracted Ingredients:**\n${extracted}\n\n` +
-        `🔍 **FSSAI Analysis:**\n${analyzeRes.output_text}`
-    });
+    const jsonText = analysisRes.output_text?.trim() || "";
+    // Model might produce additional text — attempt to parse JSON out of it.
+    // If the model returned plain JSON, parse. Otherwise, wrap fallback.
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch (e) {
+      // fallback: wrap results into a simple object
+      parsed = {
+        extracted,
+        items: [{ name: extracted, classification: "UNKNOWN", reason: "Could not parse structured output", caution: "" }],
+        score: 5.0,
+        recommendation: "Could not parse detailed analysis."
+      };
+    }
+
+    return new Response(JSON.stringify({ response: JSON.stringify(parsed, null, 2), raw: parsed }), { status: 200 });
   }
 
-  // ---------------------------------------------------------
-  // 💬 TEXT MODE
-  // ---------------------------------------------------------
+  // ----- NORMAL TEXT CHAT FLOW (existing) -----
   const { messages }: { messages: UIMessage[] } = await req.json();
-
-  const latest = messages.filter((m) => m.role === "user").pop();
-  if (latest) {
-    const text = latest.parts
-      .filter((p) => p.type === "text")
-      .map((p) => p.text)
-      .join("");
-
-    const moderation = await isContentFlagged(text);
-    if (moderation.flagged) {
-      const stream = createUIMessageStream({
-        execute: ({ writer }) => {
-          writer.write({ type: "start" });
-          writer.write({ type: "text-start", id: "blocked" });
-          writer.write({
-            type: "text-delta",
-            id: "blocked",
-            delta: moderation.denialMessage || "Message blocked."
-          });
-          writer.write({ type: "text-end", id: "blocked" });
-          writer.write({ type: "finish" });
-        }
-      });
-
-      return createUIMessageStreamResponse({ stream });
+  const latestUserMessage = messages?.filter((m) => m.role === "user").pop();
+  if (latestUserMessage) {
+    const textParts = latestUserMessage.parts?.filter(p => p.type === "text").map(p => ("text" in p ? p.text : "")).join("") || "";
+    if (textParts) {
+      const moderationResult = await isContentFlagged(textParts);
+      if (moderationResult.flagged) {
+        const stream = createUIMessageStream({
+          execute({ writer }) {
+            const textId = "moderation-denial-text";
+            writer.write({ type: "start" });
+            writer.write({ type: "text-start", id: textId });
+            writer.write({ type: "text-delta", id: textId, delta: moderationResult.denialMessage || "Your message violates our guidelines." });
+            writer.write({ type: "text-end", id: textId });
+            writer.write({ type: "finish" });
+          }
+        });
+        return createUIMessageStreamResponse({ stream });
+      }
     }
   }
 
@@ -127,7 +155,7 @@ Give bullet points + a safety score out of 10.
     system: SYSTEM_PROMPT,
     messages: convertToModelMessages(messages),
     tools: { webSearch, vectorDatabaseSearch },
-    stopWhen: stepCountIs(10)
+    stopWhen: stepCountIs(10),
   });
 
   return result.toUIMessageStreamResponse({ sendReasoning: true });
