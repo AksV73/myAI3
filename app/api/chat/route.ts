@@ -1,14 +1,14 @@
-// ===============================================
-// /app/api/chat/route.ts — BEAUTIFIED OUTPUT
-// ===============================================
+// =====================================================
+//  /api/chat/route.ts — FULL WORKING VERSION
+// =====================================================
 
 import {
-    streamText,
-    UIMessage,
-    convertToModelMessages,
-    stepCountIs,
-    createUIMessageStream,
-    createUIMessageStreamResponse
+  streamText,
+  UIMessage,
+  convertToModelMessages,
+  stepCountIs,
+  createUIMessageStream,
+  createUIMessageStreamResponse
 } from "ai";
 
 import { MODEL } from "@/config";
@@ -17,181 +17,185 @@ import { isContentFlagged } from "@/lib/moderation";
 import { webSearch } from "./tools/web-search";
 import { vectorDatabaseSearch } from "./tools/search-vector-database";
 
+// Force Node runtime
+export const runtime = "nodejs";
 export const maxDuration = 30;
 
 export async function POST(req: Request) {
+  const contentType = req.headers.get("content-type") || "";
 
-    const contentType = req.headers.get("content-type") || "";
+  // ========================================================================
+  // 📸 CASE 1: IMAGE MODE
+  // ========================================================================
+  if (contentType.includes("multipart/form-data")) {
+    const OpenAI = (await import("openai")).default;
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-    // ======================================================
-    // 📸 CASE 1 — IMAGE UPLOAD
-    // ======================================================
-    if (contentType.includes("multipart/form-data")) {
-        const OpenAI = (await import("openai")).default;
-        const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+    const formData = await req.formData();
+    const file = formData.get("image") as File | null;
 
-        const formData = await req.formData();
-        const file = formData.get("image") as File;
+    if (!file) {
+      return Response.json({ response: "No image uploaded." });
+    }
 
-        if (!file) {
-            return Response.json({ response: "No image found." });
-        }
+    // Convert to base64
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
-        // Convert uploaded image → Base64 data URL
-        const buffer = Buffer.from(await file.arrayBuffer());
-        const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
+    // ----------------------------------------------------------------------
+    // 1) OCR — extract ingredient list
+    // ----------------------------------------------------------------------
+    const extractRes = await client.responses.create({
+      model: "gpt-4o-mini",
+      input: `
+You are an OCR expert.
 
-        // ======================================================
-        // 🔍 1) Extract Ingredient List
-        // ======================================================
-        const extractRes = await client.responses.create({
-            model: "gpt-4.1-mini",
-            input: `
-You are a food-label OCR expert.
-
-Extract ONLY:
-1. Ingredient list  
-2. Contains list / May contain allergens  
-
-Return in clean comma-separated format.
+Extract ONLY the ingredient list from the food label image.
+Rules:
+- If "Ingredients:" exists → extract everything after it.
+- Also extract "Contains:" or "May contain:".
+- Return a CLEAN, comma-separated list.
+- No extra text. No commentary.
+- If nothing looks like ingredients → return "NOT_FOUND".
 
 <image>${dataUrl}</image>
 `
-        });
+    });
 
-        const extracted = extractRes.output_text || "No ingredients found.";
+    const extracted = extractRes.output_text?.trim() || "NOT_FOUND";
 
-        // ======================================================
-        // 🧪 2) Analyze using FSSAI safety rules
-        // ======================================================
-        const analyzeRes = await client.responses.create({
-            model: "gpt-4.1-mini",
-            input: `
-Classify the following ingredients based on FSSAI safety guidelines:
+    if (!extracted || extracted === "NOT_FOUND") {
+      return Response.json({
+        response: "⚠️ Could not detect ingredients. Try another image."
+      });
+    }
 
-${extracted}
+    // ----------------------------------------------------------------------
+    // 2) SAFETY ANALYSIS (STRICT JSON OUTPUT)
+    // ----------------------------------------------------------------------
+    const analyzeRes = await client.responses.create({
+      model: "gpt-4.1-mini",
+      response_format: { type: "json_object" }, // ensures valid JSON
 
-For EACH ingredient return JSON objects ONLY in this format:
-
-{
-  "ingredient": "",
-  "status": "safe | caution | harmful | banned | kid-sensitive",
-  "reason": ""
-}
-
-After this array, include:
+      input: `
+You MUST return a valid JSON object matching EXACTLY the structure below:
 
 {
+  "ingredients": [
+    {
+      "name": "",
+      "status": "safe | caution | harmful | banned | kid-sensitive",
+      "reason": ""
+    }
+  ],
   "summary": "",
   "overall_score": 0
 }
 
-DO NOT return any explanation outside of JSON.
-`
-        });
+Analyze this ingredient list using FSSAI rules:
 
-        let parsed;
-        try {
-            parsed = JSON.parse(analyzeRes.output_text || "{}");
-        } catch {
-            return Response.json({
-                response: "Could not format the safety results. Try another image."
-            });
-        }
-
-        const rows = Array.isArray(parsed) ? parsed.slice(0, -1) : [];
-        const summaryObj = Array.isArray(parsed) ? parsed[parsed.length - 1] : {};
-
-        // ======================================================
-        // 🎨 BEAUTIFY INTO A TABLE
-        // ======================================================
-        const emojiMap: Record<string, string> = {
-            "safe": "🟢 Safe",
-            "caution": "🟡 Caution",
-            "harmful": "🔴 Harmful",
-            "banned": "⛔ Banned",
-            "kid-sensitive": "👶 Kid Sensitive"
-        };
-
-        const table = `
-| Ingredient | Status | Notes |
-|-----------|--------|-------|
-${rows
-    .map(
-        (r: any) =>
-            `| ${r.ingredient} | ${emojiMap[r.status] || r.status} | ${r.reason} |`
-    )
-    .join("\n")}
-`;
-
-        // ======================================================
-        // 🧼 Final Pretty Output
-        // ======================================================
-        const finalResponse = `
-## 📸 Extracted Ingredients
 ${extracted}
 
----
+Return ONLY the JSON object.
+`
+    });
 
-## 🧪 FSSAI Safety Table
-${table}
+    let parsed;
+    try {
+      parsed = JSON.parse(analyzeRes.output_text || "{}");
+    } catch (e) {
+      return Response.json({
+        response: "⚠️ Could not format safety results. Try another image."
+      });
+    }
 
----
+    // ----------------------------------------------------------------------
+    // 3) Pretty formatting for UI
+    // ----------------------------------------------------------------------
 
-## 📝 Summary  
-${summaryObj.summary || ""}
+    const tableRows = parsed.ingredients
+      .map((ing: any) => {
+        const color =
+          ing.status === "safe"
+            ? "🟢"
+            : ing.status === "caution"
+            ? "🟡"
+            : ing.status === "kid-sensitive"
+            ? "👶"
+            : ing.status === "harmful"
+            ? "🔴"
+            : "⛔";
 
-### ⭐ Overall Safety Score: **${summaryObj.overall_score ?? "-"} / 10**
+        return `| ${ing.name} | ${color} ${ing.status.toUpperCase()} | ${ing.reason} |`;
+      })
+      .join("\n");
+
+    const table = `
+| Ingredient | Status | Reason |
+|-----------|--------|--------|
+${tableRows}
 `;
 
-        return Response.json({ response: finalResponse });
-    }
+    const finalResponse = `
+📸 **Extracted Ingredients:**  
+${extracted}
 
-    // ======================================================
-    // 💬 CASE 2 — STANDARD CHAT MODE
-    // ======================================================
-    const { messages }: { messages: UIMessage[] } = await req.json();
+🧪 **FSSAI Safety Evaluation (India)**  
+${table}
 
-    const latest = messages.filter(m => m.role === "user").pop();
+⭐ **Summary:**  
+${parsed.summary}
 
-    if (latest) {
-        const textParts = latest.parts
-            .filter(p => p.type === "text")
-            .map(p => ("text" in p ? p.text : ""))
-            .join("");
+📊 **Overall Score:** ${parsed.overall_score}/10
+`;
 
-        const moderation = await isContentFlagged(textParts);
+    return Response.json({ response: finalResponse });
+  }
 
-        if (moderation.flagged) {
-            const stream = createUIMessageStream({
-                execute({ writer }) {
-                    const id = "blocked";
-                    writer.write({ type: "start" });
-                    writer.write({ type: "text-start", id });
-                    writer.write({
-                        type: "text-delta",
-                        id,
-                        delta: moderation.denialMessage || "Message blocked."
-                    });
-                    writer.write({ type: "text-end", id });
-                    writer.write({ type: "finish" });
-                }
-            });
+  // ========================================================================
+  // 💬 CASE 2: TEXT CHAT MODE
+  // ========================================================================
+  const { messages }: { messages: UIMessage[] } = await req.json();
 
-            return createUIMessageStreamResponse({ stream });
+  const latest = messages.filter((m) => m.role === "user").pop();
+  if (latest) {
+    const textParts =
+      latest.parts
+        .filter((p) => p.type === "text")
+        .map((p: any) => p.text)
+        .join("") || "";
+
+    const moderation = await isContentFlagged(textParts);
+
+    if (moderation.flagged) {
+      const stream = createUIMessageStream({
+        execute({ writer }) {
+          const id = "blocked";
+          writer.write({ type: "start" });
+          writer.write({ type: "text-start", id });
+          writer.write({
+            type: "text-delta",
+            id,
+            delta:
+              moderation.denialMessage || "Your message violated policy."
+          });
+          writer.write({ type: "text-end", id });
+          writer.write({ type: "finish" });
         }
+      });
+
+      return createUIMessageStreamResponse({ stream });
     }
+  }
 
-    // NORMAL CHAT
-    const result = streamText({
-        model: MODEL,
-        system: SYSTEM_PROMPT,
-        messages: convertToModelMessages(messages),
-        tools: { webSearch, vectorDatabaseSearch },
-        stopWhen: stepCountIs(10)
-    });
+  // Normal streaming chat
+  const result = streamText({
+    model: MODEL,
+    system: SYSTEM_PROMPT,
+    messages: convertToModelMessages(messages),
+    tools: { webSearch, vectorDatabaseSearch },
+    stopWhen: stepCountIs(10)
+  });
 
-    return result.toUIMessageStreamResponse({
-        sendReasoning: true
-    });
+  return result.toUIMessageStreamResponse({ sendReasoning: true });
 }
