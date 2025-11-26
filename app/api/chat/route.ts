@@ -1,6 +1,6 @@
-// =====================================================
-//  /api/chat/route.ts — FIXED VERSION (NO response_format)
-// =====================================================
+// ============================================================
+//  /app/api/chat/route.ts — FINAL STABLE VERSION (OpenAI v4)
+// ============================================================
 
 import {
   streamText,
@@ -31,42 +31,46 @@ export async function POST(req: Request) {
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
     const fd = await req.formData();
-    const file = fd.get("image") as File;
-    if (!file) return Response.json({ response: "No image uploaded." });
+    const file = fd.get("image") as File | null;
+
+    if (!file) {
+      return Response.json({ response: "No image uploaded." });
+    }
 
     // Convert to base64
     const buffer = Buffer.from(await file.arrayBuffer());
     const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
     // ------------------------------------------------------------
-    // 1) OCR extraction
+    // 1) OCR EXTRACTION
     // ------------------------------------------------------------
-    const extract = await client.responses.create({
+    const ocr = await client.responses.create({
       model: "gpt-4o-mini",
       input: `
-Extract ONLY the food ingredient list from this image.
+Extract ONLY the ingredient list from this food label.
 Rules:
-- Return ingredients in comma-separated form.
-- If nothing looks like ingredients, return "NOT_FOUND".
+- Return a CLEAN comma-separated list.
+- Include "Contains" or "May contain" if present.
+- If nothing resembles ingredients, return "NOT_FOUND".
 
 <image>${dataUrl}</image>
 `
     });
 
-    const extracted = extract.output_text?.trim() || "NOT_FOUND";
+    const extracted = ocr.output_text?.trim() || "NOT_FOUND";
     if (extracted === "NOT_FOUND") {
       return Response.json({ response: "⚠️ Could not detect ingredients." });
     }
 
     // ------------------------------------------------------------
-    // 2) Analysis — JSON enforced by prompt (NOT response_format)
+    // 2) SAFETY ANALYSIS (STRICT JSON VIA PROMPT)
     // ------------------------------------------------------------
-    const analyze = await client.responses.create({
+    const analysis = await client.responses.create({
       model: "gpt-4.1-mini",
       input: `
-You MUST output STRICT JSON ONLY.
+You MUST return ONLY valid JSON. No markdown. No commentary.
 
-JSON STRUCTURE TO FOLLOW EXACTLY:
+JSON SCHEMA:
 {
   "ingredients": [
     { "name": "", "status": "", "reason": "" }
@@ -75,104 +79,106 @@ JSON STRUCTURE TO FOLLOW EXACTLY:
   "overall_score": 0
 }
 
-Rules:
-- status must be exactly one of:
-  "safe", "caution", "harmful", "banned", "kid-sensitive"
-- No comments outside JSON.
-- No markdown.
-- No explanation.
+Allowed "status" values:
+- safe
+- caution
+- harmful
+- banned
+- kid-sensitive
 
-Analyze ingredients using FSSAI logic:
+Analyze the following ingredients using FSSAI guidelines:
 
 ${extracted}
 
-Output ONLY the JSON, nothing else.
+Return ONLY the JSON object.
 `
     });
 
     let parsed;
     try {
-      parsed = JSON.parse(analyze.output_text || "{}");
-    } catch {
+      parsed = JSON.parse(analysis.output_text || "{}");
+    } catch (err) {
       return Response.json({
-        response: "⚠️ Failed to parse results. Try another image."
+        response: "⚠️ Safety evaluation failed. Try another image."
       });
     }
 
     // ------------------------------------------------------------
-    // 3) PRETTY TABLE OUTPUT
+    // 3) PRETTIFIED OUTPUT
     // ------------------------------------------------------------
-    const tableRows = parsed.ingredients
-      .map((ing: any) => {
-        const color =
-          ing.status === "safe"
+    const rows = parsed.ingredients
+      .map((i: any) => {
+        const emoji =
+          i.status === "safe"
             ? "🟢"
-            : ing.status === "caution"
+            : i.status === "caution"
             ? "🟡"
-            : ing.status === "kid-sensitive"
+            : i.status === "kid-sensitive"
             ? "👶"
-            : ing.status === "harmful"
+            : i.status === "harmful"
             ? "🔴"
             : "⛔";
-        return `| ${ing.name} | ${color} ${ing.status.toUpperCase()} | ${ing.reason} |`;
+
+        return `| ${i.name} | ${emoji} ${i.status.toUpperCase()} | ${i.reason} |`;
       })
       .join("\n");
 
     const table = `
 | Ingredient | Status | Reason |
 |-----------|--------|--------|
-${tableRows}
+${rows}
 `;
 
-    const finalText = `
-📸 **Extracted Ingredients:**  
+    return Response.json({
+      response: `
+📸 **Extracted Ingredients**  
 ${extracted}
 
-🧪 **FSSAI Safety Evaluation (India)**  
+🧪 **FSSAI Safety Evaluation**  
 ${table}
 
 ⭐ **Summary:**  
 ${parsed.summary}
 
 📊 **Overall Score:** ${parsed.overall_score}/10
-`;
-
-    return Response.json({ response: finalText });
+`
+    });
   }
 
   // ============================================================
-  // 💬 NORMAL TEXT CHAT MODE
+  // 💬 TEXT CHAT MODE
   // ============================================================
   const { messages }: { messages: UIMessage[] } = await req.json();
   const latest = messages.filter(m => m.role === "user").pop();
 
   if (latest) {
-    const textParts =
+    const content =
       latest.parts
         .filter(p => p.type === "text")
         .map((p: any) => p.text)
         .join("") || "";
 
-    const moderation = await isContentFlagged(textParts);
+    const moderation = await isContentFlagged(content);
     if (moderation.flagged) {
       const stream = createUIMessageStream({
         execute({ writer }) {
-          const id = "blocked";
           writer.write({ type: "start" });
-          writer.write({ type: "text-start", id });
+          writer.write({ type: "text-start", id: "blocked" });
           writer.write({
             type: "text-delta",
-            id,
+            id: "blocked",
             delta: moderation.denialMessage
           });
-          writer.write({ type: "text-end", id });
+          writer.write({ type: "text-end", id: "blocked" });
           writer.write({ type: "finish" });
         }
       });
+
       return createUIMessageStreamResponse({ stream });
     }
   }
 
+  // Normal chat mode
   const result = streamText({
     model: MODEL,
     system: SYSTEM_PROMPT,
