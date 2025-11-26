@@ -1,49 +1,54 @@
 // app/api/chat/route.ts
 import OpenAI from "openai";
-import { NextResponse } from "next/server"; // Next.js App Router
-import { Readable } from "stream";
-import type { UIMessage } from "ai";
+import { NextRequest } from "next/server";
+import { UIMessage } from "ai";
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-export const runtime = "nodejs";
-export const revalidate = 0;
+export const runtime = "edge"; // we don't use sharp to avoid node build issues
 
-async function fileToDataUrl(file: File) {
-  const ab = await file.arrayBuffer();
-  const u8 = new Uint8Array(ab);
-  const base64 = Buffer.from(u8).toString("base64");
-  return `data:${file.type};base64,${base64}`;
-}
+type OCRResponse = {
+  extracted: string;
+  analysis: string;
+  response: string;
+};
 
 export async function POST(req: Request) {
   const contentType = req.headers.get("content-type") || "";
 
-  // IMAGE UPLOAD flow
+  // ---------- IMAGE UPLOAD (multipart/form-data) ----------
   if (contentType.includes("multipart/form-data")) {
     try {
       const formData = await req.formData();
       const file = formData.get("image") as File | null;
-
       if (!file) {
-        return NextResponse.json({ error: "No image uploaded." }, { status: 400 });
+        return new Response(JSON.stringify({ error: "No image uploaded." }), { status: 400 });
       }
 
-      // Convert to data URL (we do NOT use sharp here to avoid build/type issues)
-      const dataUrl = await fileToDataUrl(file);
+      // Convert the browser File → base64 data URL (no server-side sharp)
+      const ab = await file.arrayBuffer();
+      const u8 = new Uint8Array(ab);
+      // Node Buffer isn't necessary for edge runtime; use btoa on binary chunk
+      let binary = "";
+      const chunkSize = 0x8000;
+      for (let i = 0; i < u8.length; i += chunkSize) {
+        const slice = u8.subarray(i, i + chunkSize);
+        binary += String.fromCharCode.apply(null, Array.from(slice));
+      }
+      const base64 = typeof globalThis.btoa === "function"
+        ? globalThis.btoa(binary)
+        : Buffer.from(u8).toString("base64");
+      const mime = file.type || "image/jpeg";
+      const dataUrl = `data:${mime};base64,${base64}`;
 
-      // -------------------------
-      // 1) OCR step - extract ingredients ONLY
-      // -------------------------
+      // ---------- 1) OCR via OpenAI Vision ----------
+      // Ask model to *extract only* the ingredients text
       const ocrPrompt = `
-You are an OCR assistant. EXTRACT ONLY the ingredient list from the image. 
-Rules:
-- Return ONLY the text after the word "Ingredients:" (or "INGREDIENTS", case-insensitive).
-- If multiple lines, return them as a single newline-separated block.
-- If no "Ingredients" header found, return any sequence of comma-separated or newline-separated ingredients you can read.
-- Return plain text only (no commentary).
+Extract ONLY the ingredient list from the image. Return plain text only (comma or newline separated).
+If you cannot find an "Ingredients" label, extract any text that looks like a list of ingredients.
+Do NOT add commentary.
 <image>${dataUrl}</image>
-`.trim();
+`;
 
       const ocrResp = await client.responses.create({
         model: "gpt-4.1-mini",
@@ -51,88 +56,66 @@ Rules:
         temperature: 0
       });
 
-      const extracted =
-        (ocrResp.output_text || "").trim().replace(/\r\n/g, "\n").replace(/\n{2,}/g, "\n");
+      const extracted = (ocrResp.output_text || "").trim() || "UNREADABLE";
 
-      // -------------------------
-      // 2) Analysis step - classify for FSSAI/allergen/child-safety
-      // -------------------------
+      // ---------- 2) FSSAI-style Analysis ----------
       const analysisPrompt = `
-You are an Indian food-safety analyst. Parse the following ingredient text and return strict JSON only.
+You are an Indian Food Safety analyst (FSSAI-aware).
+Given the ingredient list below, classify each ingredient into categories:
+- SAFE
+- CAUTION
+- POTENTIALLY_HARMFUL
+- BANNED (India)
+Also mark explicit allergens (e.g., MILK, SOY, WHEAT, NUTS, EGG) when present.
+Return a concise plain-text analysis with:
+1) Extracted ingredients (newline separated)
+2) For each ingredient: classification and a one-line reason
+3) A short "kid safety" note (yes/no + reason)
+4) A summary safety score 0-10
 
-Input ingredient text:
-"""${extracted}"""
+Ingredient list:
+${extracted}
 
-Output JSON format EXACTLY like:
-{
-  "extracted": "...",             // string (the OCR result)
-  "items": [
-    { "name": "ingredient name", "fssai_status": "SAFE|HARMFUL|BANNED|UNKNOWN",
-      "child_safe": true|false|null,
-      "possible_allergens": ["milk","soy","wheat", ...],
-      "notes": "short 1-line reason" }
-  ],
-  "summary": "short human summary",
-  "score": 0-10 (number)
-}
-
-Rules & heuristics:
-- If an ingredient is clearly an allergen (milk, egg, soy, wheat, peanut, tree nuts, sesame), list that in possible_allergens.
-- If ingredient is a preservative/potent additive known in Indian lists (e.g., certain sulfites, borates, unauthorized additives) mark HARMFUL/BANNED if applicable.
-- For ambiguous items, use UNKNOWN.
-- child_safe true if commonly safe for children; false if known to be risky (alcohols, high % salicylates, high sodium nitrite etc).
-- Keep output strictly JSON. No extra text.
-`.trim();
+Return plain text only (no JSON).
+`;
 
       const analysisResp = await client.responses.create({
         model: "gpt-4.1-mini",
         input: analysisPrompt,
-        temperature: 0,
-        max_output_tokens: 800
+        temperature: 0
       });
 
-      const analysisText = analysisResp.output_text || "";
-      let parsed;
-      try {
-        parsed = JSON.parse(analysisText);
-      } catch (e) {
-        // if model didn't return raw JSON, wrap fallback
-        parsed = {
-          extracted,
-          items: [],
-          summary: "Could not parse structured JSON from model.",
-          raw: analysisText,
-          score: 5
-        };
-      }
+      const analysis = (analysisResp.output_text || "").trim();
 
-      return NextResponse.json({ ok: true, result: parsed });
+      // ---------- 3) Build final assistant text ----------
+      const finalText =
+        `📸 **Extracted Ingredients:**\n${extracted}\n\n` +
+        `🔍 **FSSAI-style Safety Analysis:**\n${analysis}`;
+
+      const result: OCRResponse = {
+        extracted,
+        analysis,
+        response: finalText
+      };
+
+      return new Response(JSON.stringify(result), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
     } catch (err: any) {
-      return NextResponse.json({ ok: false, error: String(err?.message || err) }, { status: 500 });
+      console.error("Image handling error:", err?.message || err);
+      return new Response(JSON.stringify({ error: "Server error processing image." }), { status: 500 });
     }
   }
 
-  // TEXT CHAT flow (keeps existing behaviour)
+  // ---------- NORMAL CHAT (JSON body) ----------
   try {
-    const body = await req.json();
-    const messages = body.messages as UIMessage[] | undefined;
-
-    // if you want, pass-through to GPT model for normal chat — minimal example:
-    if (!messages || messages.length === 0) {
-      return NextResponse.json({ ok: false, error: "No messages" }, { status: 400 });
-    }
-
-    // send to model (basic passthrough)
-    const userText = messages.filter(m => m.role === "user").map(m =>
-      (m.parts || []).map(p => (p as any).text || "").join("")).join("\n");
-
-    const chatResp = await client.responses.create({
-      model: "gpt-4.1-mini",
-      input: userText
-    });
-
-    return NextResponse.json({ ok: true, response: chatResp.output_text || "" });
-  } catch (err: any) {
-    return NextResponse.json({ ok: false, error: String(err?.message || err) }, { status: 500 });
+    const { messages } = await req.json();
+    // If your app uses "ai" streaming tools, keep your existing chat logic here.
+    // For simplicity we just echo or return a placeholder if you send messages.
+    // You will likely keep your original streaming chat logic.
+    return new Response(JSON.stringify({ echo: "chat mode not implemented in this example" }), { status: 200 });
+  } catch (e) {
+    return new Response(JSON.stringify({ error: "Bad request" }), { status: 400 });
   }
 }
