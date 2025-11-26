@@ -1,5 +1,5 @@
 // ============================================================
-//  /app/api/chat/route.ts — FINAL STABLE VERSION (OpenAI v4)
+//  /app/api/chat/route.ts — FINAL WORKING VERSION
 // ============================================================
 
 import {
@@ -24,11 +24,13 @@ export async function POST(req: Request) {
   const contentType = req.headers.get("content-type") || "";
 
   // ============================================================
-  // 📸 IMAGE MODE
+  //  📸 IMAGE MODE
   // ============================================================
   if (contentType.includes("multipart/form-data")) {
     const OpenAI = (await import("openai")).default;
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+    const client = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY!
+    });
 
     const fd = await req.formData();
     const file = fd.get("image") as File | null;
@@ -42,15 +44,16 @@ export async function POST(req: Request) {
     const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
     // ------------------------------------------------------------
-    // 1) OCR EXTRACTION
+    // 1) OCR — Extract ingredients
     // ------------------------------------------------------------
     const ocr = await client.responses.create({
       model: "gpt-4o-mini",
       input: `
 Extract ONLY the ingredient list from this food label.
 Rules:
-- Return a CLEAN comma-separated list.
-- Include "Contains" or "May contain" if present.
+- Clean comma-separated ingredients only.
+- If "Contains" or "May contain" exist, include them.
+- Do not add commentary.
 - If nothing resembles ingredients, return "NOT_FOUND".
 
 <image>${dataUrl}</image>
@@ -63,14 +66,14 @@ Rules:
     }
 
     // ------------------------------------------------------------
-    // 2) SAFETY ANALYSIS (STRICT JSON VIA PROMPT)
+    // 2) SAFETY ANALYSIS — JSON via prompt
     // ------------------------------------------------------------
     const analysis = await client.responses.create({
       model: "gpt-4.1-mini",
       input: `
-You MUST return ONLY valid JSON. No markdown. No commentary.
+You MUST return ONLY valid JSON. No markdown. NO comments.
 
-JSON SCHEMA:
+JSON STRUCTURE:
 {
   "ingredients": [
     { "name": "", "status": "", "reason": "" }
@@ -79,18 +82,18 @@ JSON SCHEMA:
   "overall_score": 0
 }
 
-Allowed "status" values:
+Allowed statuses:
 - safe
 - caution
 - harmful
 - banned
 - kid-sensitive
 
-Analyze the following ingredients using FSSAI guidelines:
+Analyze these ingredients using FSSAI guidelines:
 
 ${extracted}
 
-Return ONLY the JSON object.
+Return ONLY THE JSON OBJECT.
 `
     });
 
@@ -99,12 +102,12 @@ Return ONLY the JSON object.
       parsed = JSON.parse(analysis.output_text || "{}");
     } catch (err) {
       return Response.json({
-        response: "⚠️ Safety evaluation failed. Try another image."
+        response: "⚠️ Could not format the safety results. Try another image."
       });
     }
 
     // ------------------------------------------------------------
-    // 3) PRETTIFIED OUTPUT
+    // 3) BEAUTIFUL TABLE OUTPUT
     // ------------------------------------------------------------
     const rows = parsed.ingredients
       .map((i: any) => {
@@ -141,50 +144,19 @@ ${table}
 ${parsed.summary}
 
 📊 **Overall Score:** ${parsed.overall_score}/10
-`
+    `
     });
   }
 
   // ============================================================
-  // 💬 TEXT CHAT MODE
+  //  💬 TEXT CHAT MODE
   // ============================================================
   const { messages }: { messages: UIMessage[] } = await req.json();
-  const latest = messages.filter(m => m.role === "user").pop();
+  const latest = messages.filter((m) => m.role === "user").pop();
 
+  // Moderation check
   if (latest) {
     const content =
       latest.parts
-        .filter(p => p.type === "text")
-        .map((p: any) => p.text)
-        .join("") || "";
-
-   if (moderation.flagged) {
-  const stream = createUIMessageStream({
-    execute({ writer }) {
-      writer.write({ type: "start" });
-      writer.write({ type: "text-start", id: "blocked" });
-      writer.write({
-        type: "text-delta",
-        id: "blocked",
-        delta: moderation.denialMessage ?? "Message blocked for safety."
-      });
-      writer.write({ type: "text-end", id: "blocked" });
-      writer.write({ type: "finish" });
-    }
-  });
-
-  return createUIMessageStreamResponse({ stream });
-}
-
-
-  // Normal chat mode
-  const result = streamText({
-    model: MODEL,
-    system: SYSTEM_PROMPT,
-    messages: convertToModelMessages(messages),
-    tools: { webSearch, vectorDatabaseSearch },
-    stopWhen: stepCountIs(10)
-  });
-
-  return result.toUIMessageStreamResponse({ sendReasoning: true });
-}
+        .filter((p) => p.type === "text")
+        .map((
