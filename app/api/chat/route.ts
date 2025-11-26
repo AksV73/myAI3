@@ -22,7 +22,9 @@ export const maxDuration = 30;
 export async function POST(req: Request) {
   const contentType = req.headers.get("content-type") || "";
 
-  // ---------------------- IMAGE MODE ----------------------
+  // ---------------------------------------------------------
+  // 📸 IMAGE UPLOAD MODE
+  // ---------------------------------------------------------
   if (contentType.includes("multipart/form-data")) {
     const OpenAI = (await import("openai")).default;
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
@@ -31,20 +33,20 @@ export async function POST(req: Request) {
     const file = formData.get("image") as File;
     if (!file) return Response.json({ response: "No image uploaded." });
 
-    // --- FIXED BUFFER CREATION ---
-    const arr = new Uint8Array(await file.arrayBuffer());
-    const buffer = Buffer.from(arr);
+    // --- TRUE BUFFER CREATION (NO TYPING ERRORS) ---
+    const ab = await file.arrayBuffer();
+    const buffer: Buffer = Buffer.from(new Uint8Array(ab));
 
-    // --- IMAGE ENHANCEMENT ---
-    let enhanced = buffer;
+    // --- IMAGE ENHANCEMENT WITH TYPING FIX ---
+    let enhanced: Buffer = buffer;
     try {
-      enhanced = await sharp(buffer)
+      enhanced = await (sharp as any)(buffer)
         .rotate()
         .sharpen(0.4)
         .normalize()
         .toBuffer();
-    } catch (e) {
-      enhanced = buffer; // fallback
+    } catch (err) {
+      enhanced = buffer; // safe fallback
     }
 
     const dataUrl = `data:${file.type};base64,${enhanced.toString("base64")}`;
@@ -53,8 +55,8 @@ export async function POST(req: Request) {
     const extractRes = await client.responses.create({
       model: "gpt-4.1-mini",
       input: `
-Extract ONLY the ingredients or any text that resembles an ingredient list.
-Plain text only. No extra words.
+Extract ONLY the ingredient list.
+Return plain text only — no explanation.
 
 <image>${dataUrl}</image>
 `
@@ -62,46 +64,48 @@ Plain text only. No extra words.
 
     const extracted = extractRes.output_text?.trim() || "Could not read ingredients.";
 
-    // --- ANALYZE ---
+    // --- FSSAI ANALYSIS ---
     const analyzeRes = await client.responses.create({
       model: "gpt-4.1-mini",
       input: `
 You are an Indian FSSAI Additive Evaluator.
 
-Analyze the ingredients below:
+Analyze the following:
 ${extracted}
 
-Classify each ingredient into:
+Classify each item as:
 - SAFE
 - HARMFUL
 - BANNED
 - KID-SENSITIVE
 
-Return structured bullet points + final score /10.
+Give bullet points + a safety score out of 10.
 `
     });
 
     return Response.json({
       response:
         `📸 **Extracted Ingredients:**\n${extracted}\n\n` +
-        `🔍 **FSSAI Safety Analysis:**\n${analyzeRes.output_text}`
+        `🔍 **FSSAI Analysis:**\n${analyzeRes.output_text}`
     });
   }
 
-  // ---------------------- TEXT CHAT MODE ----------------------
+  // ---------------------------------------------------------
+  // 💬 TEXT MODE
+  // ---------------------------------------------------------
   const { messages }: { messages: UIMessage[] } = await req.json();
 
-  const latest = messages.filter(m => m.role === "user").pop();
+  const latest = messages.filter((m) => m.role === "user").pop();
   if (latest) {
-    const textParts = latest.parts
-      .filter(p => p.type === "text")
-      .map(p => p.text)
+    const text = latest.parts
+      .filter((p) => p.type === "text")
+      .map((p) => p.text)
       .join("");
 
-    const moderation = await isContentFlagged(textParts);
+    const moderation = await isContentFlagged(text);
     if (moderation.flagged) {
       const stream = createUIMessageStream({
-        execute({ writer }) {
+        execute: ({ writer }) => {
           writer.write({ type: "start" });
           writer.write({ type: "text-start", id: "blocked" });
           writer.write({
@@ -113,6 +117,7 @@ Return structured bullet points + final score /10.
           writer.write({ type: "finish" });
         }
       });
+
       return createUIMessageStreamResponse({ stream });
     }
   }
