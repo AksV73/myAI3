@@ -1,5 +1,5 @@
 // =====================================================
-//  /api/chat/route.ts — FULL WORKING VERSION
+//  /api/chat/route.ts — FIXED VERSION (NO response_format)
 // =====================================================
 
 import {
@@ -17,102 +17,91 @@ import { isContentFlagged } from "@/lib/moderation";
 import { webSearch } from "./tools/web-search";
 import { vectorDatabaseSearch } from "./tools/search-vector-database";
 
-// Force Node runtime
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
 export async function POST(req: Request) {
   const contentType = req.headers.get("content-type") || "";
 
-  // ========================================================================
-  // 📸 CASE 1: IMAGE MODE
-  // ========================================================================
+  // ============================================================
+  // 📸 IMAGE MODE
+  // ============================================================
   if (contentType.includes("multipart/form-data")) {
     const OpenAI = (await import("openai")).default;
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-    const formData = await req.formData();
-    const file = formData.get("image") as File | null;
-
-    if (!file) {
-      return Response.json({ response: "No image uploaded." });
-    }
+    const fd = await req.formData();
+    const file = fd.get("image") as File;
+    if (!file) return Response.json({ response: "No image uploaded." });
 
     // Convert to base64
     const buffer = Buffer.from(await file.arrayBuffer());
     const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
-    // ----------------------------------------------------------------------
-    // 1) OCR — extract ingredient list
-    // ----------------------------------------------------------------------
-    const extractRes = await client.responses.create({
+    // ------------------------------------------------------------
+    // 1) OCR extraction
+    // ------------------------------------------------------------
+    const extract = await client.responses.create({
       model: "gpt-4o-mini",
       input: `
-You are an OCR expert.
-
-Extract ONLY the ingredient list from the food label image.
+Extract ONLY the food ingredient list from this image.
 Rules:
-- If "Ingredients:" exists → extract everything after it.
-- Also extract "Contains:" or "May contain:".
-- Return a CLEAN, comma-separated list.
-- No extra text. No commentary.
-- If nothing looks like ingredients → return "NOT_FOUND".
+- Return ingredients in comma-separated form.
+- If nothing looks like ingredients, return "NOT_FOUND".
 
 <image>${dataUrl}</image>
 `
     });
 
-    const extracted = extractRes.output_text?.trim() || "NOT_FOUND";
-
-    if (!extracted || extracted === "NOT_FOUND") {
-      return Response.json({
-        response: "⚠️ Could not detect ingredients. Try another image."
-      });
+    const extracted = extract.output_text?.trim() || "NOT_FOUND";
+    if (extracted === "NOT_FOUND") {
+      return Response.json({ response: "⚠️ Could not detect ingredients." });
     }
 
-    // ----------------------------------------------------------------------
-    // 2) SAFETY ANALYSIS (STRICT JSON OUTPUT)
-    // ----------------------------------------------------------------------
-    const analyzeRes = await client.responses.create({
+    // ------------------------------------------------------------
+    // 2) Analysis — JSON enforced by prompt (NOT response_format)
+    // ------------------------------------------------------------
+    const analyze = await client.responses.create({
       model: "gpt-4.1-mini",
-      response_format: { type: "json_object" }, // ensures valid JSON
-
       input: `
-You MUST return a valid JSON object matching EXACTLY the structure below:
+You MUST output STRICT JSON ONLY.
 
+JSON STRUCTURE TO FOLLOW EXACTLY:
 {
   "ingredients": [
-    {
-      "name": "",
-      "status": "safe | caution | harmful | banned | kid-sensitive",
-      "reason": ""
-    }
+    { "name": "", "status": "", "reason": "" }
   ],
   "summary": "",
   "overall_score": 0
 }
 
-Analyze this ingredient list using FSSAI rules:
+Rules:
+- status must be exactly one of:
+  "safe", "caution", "harmful", "banned", "kid-sensitive"
+- No comments outside JSON.
+- No markdown.
+- No explanation.
+
+Analyze ingredients using FSSAI logic:
 
 ${extracted}
 
-Return ONLY the JSON object.
+Output ONLY the JSON, nothing else.
 `
     });
 
     let parsed;
     try {
-      parsed = JSON.parse(analyzeRes.output_text || "{}");
-    } catch (e) {
+      parsed = JSON.parse(analyze.output_text || "{}");
+    } catch {
       return Response.json({
-        response: "⚠️ Could not format safety results. Try another image."
+        response: "⚠️ Failed to parse results. Try another image."
       });
     }
 
-    // ----------------------------------------------------------------------
-    // 3) Pretty formatting for UI
-    // ----------------------------------------------------------------------
-
+    // ------------------------------------------------------------
+    // 3) PRETTY TABLE OUTPUT
+    // ------------------------------------------------------------
     const tableRows = parsed.ingredients
       .map((ing: any) => {
         const color =
@@ -125,7 +114,6 @@ Return ONLY the JSON object.
             : ing.status === "harmful"
             ? "🔴"
             : "⛔";
-
         return `| ${ing.name} | ${color} ${ing.status.toUpperCase()} | ${ing.reason} |`;
       })
       .join("\n");
@@ -136,7 +124,7 @@ Return ONLY the JSON object.
 ${tableRows}
 `;
 
-    const finalResponse = `
+    const finalText = `
 📸 **Extracted Ingredients:**  
 ${extracted}
 
@@ -149,24 +137,23 @@ ${parsed.summary}
 📊 **Overall Score:** ${parsed.overall_score}/10
 `;
 
-    return Response.json({ response: finalResponse });
+    return Response.json({ response: finalText });
   }
 
-  // ========================================================================
-  // 💬 CASE 2: TEXT CHAT MODE
-  // ========================================================================
+  // ============================================================
+  // 💬 NORMAL TEXT CHAT MODE
+  // ============================================================
   const { messages }: { messages: UIMessage[] } = await req.json();
+  const latest = messages.filter(m => m.role === "user").pop();
 
-  const latest = messages.filter((m) => m.role === "user").pop();
   if (latest) {
     const textParts =
       latest.parts
-        .filter((p) => p.type === "text")
+        .filter(p => p.type === "text")
         .map((p: any) => p.text)
         .join("") || "";
 
     const moderation = await isContentFlagged(textParts);
-
     if (moderation.flagged) {
       const stream = createUIMessageStream({
         execute({ writer }) {
@@ -176,19 +163,16 @@ ${parsed.summary}
           writer.write({
             type: "text-delta",
             id,
-            delta:
-              moderation.denialMessage || "Your message violated policy."
+            delta: moderation.denialMessage
           });
           writer.write({ type: "text-end", id });
           writer.write({ type: "finish" });
         }
       });
-
       return createUIMessageStreamResponse({ stream });
     }
   }
 
-  // Normal streaming chat
   const result = streamText({
     model: MODEL,
     system: SYSTEM_PROMPT,
