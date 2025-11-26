@@ -16,7 +16,12 @@ import { ChatHeaderBlock } from "@/app/parts/chat-header";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { UIMessage } from "ai";
 import { useEffect, useState, useRef } from "react";
-import { AI_NAME, CLEAR_CHAT_TEXT, OWNER_NAME, WELCOME_MESSAGE } from "@/config";
+import {
+  AI_NAME,
+  CLEAR_CHAT_TEXT,
+  OWNER_NAME,
+  WELCOME_MESSAGE
+} from "@/config";
 import Image from "next/image";
 import Link from "next/link";
 
@@ -29,25 +34,26 @@ const formSchema = z.object({
 
 const STORAGE_KEY = "chat-messages";
 
-type SavedState = {
+type StorageData = {
   messages: UIMessage[];
   durations: Record<string, number>;
 };
 
-const loadMessages = (): SavedState => {
+const loadMessages = () => {
   if (typeof window === "undefined") return { messages: [], durations: {} };
+
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : { messages: [], durations: {} };
+    if (!raw) return { messages: [], durations: {} };
+    return JSON.parse(raw) as StorageData;
   } catch {
     return { messages: [], durations: {} };
   }
 };
 
 const saveMessages = (messages: UIMessage[], durations: Record<string, number>) => {
-  if (typeof window !== "undefined") {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ messages, durations }));
-  }
+  if (typeof window === "undefined") return;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ messages, durations }));
 };
 
 export default function Chat() {
@@ -56,7 +62,7 @@ export default function Chat() {
 
   const stored = typeof window !== "undefined" ? loadMessages() : { messages: [], durations: {} };
 
-  const [durations, setDurations] = useState<Record<string, number>>(stored.durations);
+  const [durations, setDurations] = useState(stored.durations);
   const [initialMessages] = useState<UIMessage[]>(stored.messages);
 
   const { messages, sendMessage, status, stop, setMessages } = useChat({
@@ -73,7 +79,7 @@ export default function Chat() {
     if (isClient) saveMessages(messages, durations);
   }, [messages, durations, isClient]);
 
-  // 🌟 Welcome message
+  // Welcome message
   useEffect(() => {
     if (!isClient || initialMessages.length !== 0 || welcomeRef.current) return;
 
@@ -93,7 +99,6 @@ export default function Chat() {
     defaultValues: { message: "" }
   });
 
-  // 💬 Send text message
   function onSubmit(data: z.infer<typeof formSchema>) {
     sendMessage({ text: data.message });
     form.reset();
@@ -132,10 +137,9 @@ export default function Chat() {
           </ChatHeader>
         </div>
 
-        {/* CHAT LOG */}
+        {/* CHAT AREA */}
         <div className="h-screen overflow-y-auto px-5 py-4 w-full pt-[88px] pb-[150px]">
           <div className="flex flex-col items-center justify-end min-h-full">
-
             {isClient ? (
               <>
                 <MessageWall
@@ -143,12 +147,7 @@ export default function Chat() {
                   status={status}
                   durations={durations}
                   onDurationChange={(key, d) =>
-                    setDurations(
-                      (prev: Record<string, number>) => ({
-                        ...prev,
-                        [key]: d
-                      })
-                    )
+                    setDurations((prev) => ({ ...prev, [key]: d }))
                   }
                 />
 
@@ -171,7 +170,7 @@ export default function Chat() {
 
               <form id="chat-form" onSubmit={form.handleSubmit(onSubmit)}>
 
-                {/* 📸 IMAGE UPLOAD */}
+                {/* IMAGE UPLOAD */}
                 <input
                   type="file"
                   accept="image/*"
@@ -185,19 +184,19 @@ export default function Chat() {
                     formData.append("image", file);
 
                     // Remove previous OCR messages
-                    setMessages((prev) =>
+                    setMessages((prev: UIMessage[]) =>
                       prev.filter((m) => !m.id?.startsWith("ocr-"))
                     );
 
                     // Add analyzing message
-                    const analyzing = {
+                    const analyzing: UIMessage = {
                       id: `ocr-analyzing-${Date.now()}`,
                       role: "assistant",
                       parts: [{ type: "text", text: "📸 Analyzing image…" }]
                     };
                     setMessages((prev) => [...prev, analyzing]);
 
-                    // Send to backend
+                    // Send request
                     const res = await fetch("/api/chat", {
                       method: "POST",
                       body: formData
@@ -205,20 +204,20 @@ export default function Chat() {
 
                     const data = await res.json();
 
-                    // Remove analyzing message
-                    setMessages((prev) =>
+                    // Remove analyzing
+                    setMessages((prev: UIMessage[]) =>
                       prev.filter((m) => m.id !== analyzing.id)
                     );
 
-                    // Insert final OCR result
-                    const resultMsg = {
+                    // Final result message
+                    const resultMsg: UIMessage = {
                       id: `ocr-${Date.now()}`,
                       role: "assistant",
                       parts: [{ type: "text", text: data.response }]
                     };
                     setMessages((prev) => [...prev, resultMsg]);
 
-                    // Reset input (allows same file upload again)
+                    // Reset input so user can upload same image again
                     e.target.value = "";
                   }}
                 />
@@ -275,7 +274,6 @@ export default function Chat() {
                     )}
                   />
                 </FieldGroup>
-
               </form>
             </div>
           </div>
@@ -285,7 +283,6 @@ export default function Chat() {
             <Link href="/terms" className="underline">Terms</Link>&nbsp;· Powered by&nbsp;
             <Link href="https://ringel.ai/" className="underline">Ringel.AI</Link>
           </div>
-
         </div>
       </main>
     </div>
