@@ -1,4 +1,4 @@
-export const runtime = "nodejs"; // IMPORTANT: enables sharp
+export const runtime = "nodejs";
 
 import {
   streamText,
@@ -36,10 +36,11 @@ export async function POST(req: Request) {
       return Response.json({ response: "No image uploaded." });
     }
 
-    // -------- Convert to Node.js Buffer --------
-    const buffer = Buffer.from(await file.arrayBuffer());
+    // ---- FIXED BUFFER CREATION ----
+    const ab = await file.arrayBuffer();
+    const buffer = Buffer.from(new Uint8Array(ab));
 
-    // -------- Enhance image safely (no format conversion) --------
+    // ---- Image Enhancement ----
     let enhanced = buffer;
     try {
       enhanced = await sharp(buffer)
@@ -51,43 +52,36 @@ export async function POST(req: Request) {
       enhanced = buffer;
     }
 
-    // -------- Convert to DataURL for OpenAI Vision --------
     const dataUrl = `data:${file.type};base64,${enhanced.toString("base64")}`;
 
-    // -------- OCR: Extract Ingredients --------
+    // ---- OCR ----
     const extractRes = await client.responses.create({
       model: "gpt-4.1-mini",
       input: `
-Extract ONLY the ingredients or anything that looks like an ingredient list.
-Return plain text only.
+Extract ONLY the ingredient list or anything that looks like ingredients.
+Plain text only.
 
 <image>${dataUrl}</image>
 `
     });
 
-    const extracted =
-      extractRes.output_text?.trim() || "Could not read ingredients.";
+    const extracted = extractRes.output_text?.trim() || "Could not read ingredients.";
 
-    // -------- FSSAI Analysis --------
+    // ---- FSSAI Analysis ----
     const analyzeRes = await client.responses.create({
       model: "gpt-4.1-mini",
       input: `
-You are an Indian FSSAI Additive Evaluator.
+You are an Indian FSSAI Additive Expert.
+Analyze:
 
-Analyze the following ingredients:
 ${extracted}
 
-Classify each item into:
-- SAFE
-- HARMFUL
-- BANNED
-- KID-SENSITIVE
-
-Return neat bullet points and give a final safety score out of 10.
+Classify each item into SAFE / HARMFUL / BANNED / KID-SENSITIVE.
+Return bullet points + final score /10.
 `
     });
 
-    const analysis = analyzeRes.output_text || "Could not analyze ingredients.";
+    const analysis = analyzeRes.output_text || "Could not analyze.";
 
     return Response.json({
       response:
@@ -97,7 +91,7 @@ Return neat bullet points and give a final safety score out of 10.
   }
 
   // ======================================================
-  // 💬 CASE 2 — NORMAL TEXT CHAT
+  // 💬 CASE 2 — NORMAL CHAT
   // ======================================================
   const { messages }: { messages: UIMessage[] } = await req.json();
 
@@ -131,7 +125,6 @@ Return neat bullet points and give a final safety score out of 10.
     }
   }
 
-  // -------- Normal chat mode --------
   const result = streamText({
     model: MODEL,
     system: SYSTEM_PROMPT,
