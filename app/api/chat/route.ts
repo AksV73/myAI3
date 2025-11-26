@@ -34,17 +34,14 @@ export async function POST(req: Request) {
 
     const fd = await req.formData();
     const file = fd.get("image") as File | null;
+    if (!file) return Response.json({ response: "No image uploaded." });
 
-    if (!file) {
-      return Response.json({ response: "No image uploaded." });
-    }
-
-    // Convert to base64
+    // Convert uploaded image → Base64
     const buffer = Buffer.from(await file.arrayBuffer());
     const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
     // ------------------------------------------------------------
-    // 1) OCR — Extract ingredients
+    // 1) OCR — Extract ingredients only
     // ------------------------------------------------------------
     const ocr = await client.responses.create({
       model: "gpt-4o-mini",
@@ -52,28 +49,31 @@ export async function POST(req: Request) {
 Extract ONLY the ingredient list from this food label.
 Rules:
 - Clean comma-separated ingredients only.
-- If "Contains" or "May contain" exist, include them.
-- Do not add commentary.
-- If nothing resembles ingredients, return "NOT_FOUND".
+- Include "Contains" or "May contain".
+- No extras, no commentary.
+- If nothing resembles ingredients → return "NOT_FOUND".
 
 <image>${dataUrl}</image>
 `
     });
 
     const extracted = ocr.output_text?.trim() || "NOT_FOUND";
+
     if (extracted === "NOT_FOUND") {
-      return Response.json({ response: "⚠️ Could not detect ingredients." });
+      return Response.json({
+        response: "⚠️ Could not detect ingredients. Try a clearer image."
+      });
     }
 
     // ------------------------------------------------------------
-    // 2) SAFETY ANALYSIS — JSON via prompt
+    // 2) FSSAI SAFETY ANALYSIS — JSON enforced via prompt
     // ------------------------------------------------------------
     const analysis = await client.responses.create({
       model: "gpt-4.1-mini",
       input: `
-You MUST return ONLY valid JSON. No markdown. NO comments.
+You MUST return ONLY valid JSON. No markdown. No commentary.
 
-JSON STRUCTURE:
+JSON FORMAT:
 {
   "ingredients": [
     { "name": "", "status": "", "reason": "" }
@@ -89,11 +89,11 @@ Allowed statuses:
 - banned
 - kid-sensitive
 
-Analyze these ingredients using FSSAI guidelines:
+Analyze using **FSSAI guidelines**:
 
 ${extracted}
 
-Return ONLY THE JSON OBJECT.
+Return ONLY the JSON.
 `
     });
 
@@ -121,7 +121,6 @@ Return ONLY THE JSON OBJECT.
             : i.status === "harmful"
             ? "🔴"
             : "⛔";
-
         return `| ${i.name} | ${emoji} ${i.status.toUpperCase()} | ${i.reason} |`;
       })
       .join("\n");
@@ -144,7 +143,7 @@ ${table}
 ${parsed.summary}
 
 📊 **Overall Score:** ${parsed.overall_score}/10
-    `
+`
     });
   }
 
@@ -154,9 +153,43 @@ ${parsed.summary}
   const { messages }: { messages: UIMessage[] } = await req.json();
   const latest = messages.filter((m) => m.role === "user").pop();
 
-  // Moderation check
   if (latest) {
     const content =
       latest.parts
         .filter((p) => p.type === "text")
-        .map((
+        .map((p: any) => p.text)
+        .join("") || "";
+
+    // Run moderation
+    const moderation = await isContentFlagged(content);
+
+    if (moderation.flagged) {
+      const stream = createUIMessageStream({
+        execute({ writer }) {
+          writer.write({ type: "start" });
+          writer.write({ type: "text-start", id: "blocked" });
+          writer.write({
+            type: "text-delta",
+            id: "blocked",
+            delta: moderation.denialMessage ?? "Message blocked."
+          });
+          writer.write({ type: "text-end", id: "blocked" });
+          writer.write({ type: "finish" });
+        }
+      });
+
+      return createUIMessageStreamResponse({ stream });
+    }
+  }
+
+  // NORMAL CHAT MODE
+  const result = streamText({
+    model: MODEL,
+    system: SYSTEM_PROMPT,
+    messages: convertToModelMessages(messages),
+    tools: { webSearch, vectorDatabaseSearch },
+    stopWhen: stepCountIs(10)
+  });
+
+  return result.toUIMessageStreamResponse({ sendReasoning: true });
+}
