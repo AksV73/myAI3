@@ -1,3 +1,7 @@
+// ===============================================
+// /app/api/chat/route.ts — BEAUTIFIED OUTPUT
+// ===============================================
+
 import {
     streamText,
     UIMessage,
@@ -23,7 +27,6 @@ export async function POST(req: Request) {
     // 📸 CASE 1 — IMAGE UPLOAD
     // ======================================================
     if (contentType.includes("multipart/form-data")) {
-
         const OpenAI = (await import("openai")).default;
         const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
@@ -39,24 +42,18 @@ export async function POST(req: Request) {
         const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
         // ======================================================
-        // 🔍 1) Extract Ingredient List INTELLIGENTLY
+        // 🔍 1) Extract Ingredient List
         // ======================================================
         const extractRes = await client.responses.create({
             model: "gpt-4.1-mini",
             input: `
 You are a food-label OCR expert.
 
-From the image below, extract the INGREDIENT LIST if it exists.
+Extract ONLY:
+1. Ingredient list  
+2. Contains list / May contain allergens  
 
-Rules:
-- Return ONLY the ingredient list (comma or line separated).
-- Ignore nutrition tables, calories, barcode text, slogans.
-- If the label has "CONTAINS" or "MAY CONTAIN", ALSO extract them.
-- If no explicit "Ingredients:" header exists, detect ingredient-like text.
-- Remove non-food text.
-- Clean and normalize the output.
-
-If nothing resembles ingredients, return: "No ingredients found."
+Return in clean comma-separated format.
 
 <image>${dataUrl}</image>
 `
@@ -65,42 +62,89 @@ If nothing resembles ingredients, return: "No ingredients found."
         const extracted = extractRes.output_text || "No ingredients found.";
 
         // ======================================================
-        // 🧪 2) Analyze Using FSSAI Logic
+        // 🧪 2) Analyze using FSSAI safety rules
         // ======================================================
         const analyzeRes = await client.responses.create({
             model: "gpt-4.1-mini",
             input: `
-You are an Indian FSSAI Additive Analyzer.
-
-Given these extracted ingredients:
+Classify the following ingredients based on FSSAI safety guidelines:
 
 ${extracted}
 
-Classify each into:
-- SAFE  
-- HARMFUL  
-- BANNED (FSSAI)  
-- KID-SENSITIVE  
+For EACH ingredient return JSON objects ONLY in this format:
 
-Return results in clear bullet points with emojis:
-🟢 Safe  
-🟡 Caution  
-🔴 Harmful  
-⛔ Banned  
-👶 Kid-sensitive  
+{
+  "ingredient": "",
+  "status": "safe | caution | harmful | banned | kid-sensitive",
+  "reason": ""
+}
+
+After this array, include:
+
+{
+  "summary": "",
+  "overall_score": 0
+}
+
+DO NOT return any explanation outside of JSON.
 `
         });
 
-        const analysis = analyzeRes.output_text || "Could not analyze ingredients.";
+        let parsed;
+        try {
+            parsed = JSON.parse(analyzeRes.output_text || "{}");
+        } catch {
+            return Response.json({
+                response: "Could not format the safety results. Try another image."
+            });
+        }
 
-        return Response.json({
-            response:
-`📸 **Extracted Ingredients:**  
+        const rows = Array.isArray(parsed) ? parsed.slice(0, -1) : [];
+        const summaryObj = Array.isArray(parsed) ? parsed[parsed.length - 1] : {};
+
+        // ======================================================
+        // 🎨 BEAUTIFY INTO A TABLE
+        // ======================================================
+        const emojiMap: Record<string, string> = {
+            "safe": "🟢 Safe",
+            "caution": "🟡 Caution",
+            "harmful": "🔴 Harmful",
+            "banned": "⛔ Banned",
+            "kid-sensitive": "👶 Kid Sensitive"
+        };
+
+        const table = `
+| Ingredient | Status | Notes |
+|-----------|--------|-------|
+${rows
+    .map(
+        (r: any) =>
+            `| ${r.ingredient} | ${emojiMap[r.status] || r.status} | ${r.reason} |`
+    )
+    .join("\n")}
+`;
+
+        // ======================================================
+        // 🧼 Final Pretty Output
+        // ======================================================
+        const finalResponse = `
+## 📸 Extracted Ingredients
 ${extracted}
 
-🔍 **FSSAI Safety Analysis:**  
-${analysis}`
-        });
+---
+
+## 🧪 FSSAI Safety Table
+${table}
+
+---
+
+## 📝 Summary  
+${summaryObj.summary || ""}
+
+### ⭐ Overall Safety Score: **${summaryObj.overall_score ?? "-"} / 10**
+`;
+
+        return Response.json({ response: finalResponse });
     }
 
     // ======================================================
@@ -138,9 +182,7 @@ ${analysis}`
         }
     }
 
-    // ======================================================
-    // 🤖 Normal Streaming Chat
-    // ======================================================
+    // NORMAL CHAT
     const result = streamText({
         model: MODEL,
         system: SYSTEM_PROMPT,
