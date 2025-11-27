@@ -16,13 +16,13 @@ import { vectorDatabaseSearch } from "./tools/search-vector-database";
 export const maxDuration = 30;
 
 // ---------------------------------------------------------
-// 🆕 ADD THIS — Markdown Beautifier
+// 🆕 Markdown Beautifier
 // ---------------------------------------------------------
 function beautifyMarkdown(text: string): string {
     return text
-        .replace(/\. /g, ".\n\n")      // spacing after sentences
-        .replace(/###/g, "\n###")      // spacing before headings
-        .replace(/\n{3,}/g, "\n\n")    // normalize extra newlines
+        .replace(/\. /g, ".\n\n")      // add spacing after sentences
+        .replace(/###/g, "\n###")      // add line breaks before headings
+        .replace(/\n{3,}/g, "\n\n")    // normalize excessive newlines
         .trim();
 }
 
@@ -50,13 +50,14 @@ export async function POST(req: Request) {
         const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
         // ======================================================
-        // 🔍 1) Extract Ingredients
+        // 🔍 1) Extract Ingredient List
         // ======================================================
         const extractRes = await client.responses.create({
             model: "gpt-4.1-mini",
             input: `
 You are a food-label OCR expert.
-Return ONLY the extracted ingredient list in clean format.
+
+Extract ONLY the ingredient list from this image:
 
 <image>${dataUrl}</image>
 `
@@ -65,27 +66,26 @@ Return ONLY the extracted ingredient list in clean format.
         const extracted = extractRes.output_text || "No ingredients found.";
 
         // ======================================================
-        // 🧪 2) FSSAI Safety Analysis
+        // 🧪 2) Ingredient Safety Analysis
         // ======================================================
         const analyzeRes = await client.responses.create({
             model: "gpt-4.1-mini",
             input: `
 You are an Indian FSSAI Additive Analyzer.
 
-Given these extracted ingredients:
+Analyze these ingredients:
 
 ${extracted}
 
-Return the analysis in:
+Return results in:
 - Clean Markdown
 - Bullet points
-- Emojis for safety level
+- Emojis (🟢🟡🔴⛔👶)
 `
         });
 
         const analysis = beautifyMarkdown(analyzeRes.output_text || "Could not analyze ingredients.");
 
-        // 🆕 PRETTIFIED IMAGE OUTPUT
         return Response.json({
             response:
 `## 📸 Extracted Ingredients  
@@ -132,12 +132,11 @@ ${analysis}`
     }
 
     // ======================================================
-    // 🤖 Normal Streaming Chat
+    // 🤖 Streaming Chat with Markdown Formatting
     // ======================================================
     const result = streamText({
         model: MODEL,
 
-        // 🆕 Improve formatting in AI behavior
         system:
 `${SYSTEM_PROMPT}
 
@@ -147,7 +146,7 @@ Use:
 - Bullet points
 - Short paragraphs
 - Bold important concepts
-Avoid long dense paragraphs.
+No long dense paragraphs.
 `,
 
         messages: convertToModelMessages(messages),
@@ -156,10 +155,18 @@ Avoid long dense paragraphs.
     });
 
     // -----------------------------------------------------
-    // 🆕 Beautify the streamed result before sending
+    // 🆕 Transform stream output to beautify markdown
     // -----------------------------------------------------
-    return result.toUIMessageStreamResponse({
-        sendReasoning: true,
-        transform: (text) => beautifyMarkdown(text)  // <— MAGIC LINE
+    const stream = result.toDataStream();
+
+    const transformed = stream.experimental_transform({
+        transform(chunk) {
+            if (chunk.type === "text-delta" && chunk.text) {
+                chunk.text = beautifyMarkdown(chunk.text);
+            }
+            return chunk;
+        }
     });
+
+    return transformed.toResponse();
 }
