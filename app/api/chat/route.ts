@@ -1,7 +1,8 @@
 import {
   streamText,
   convertToModelMessages,
-  UIMessage
+  UIMessage,
+  stepCountIs,
 } from "ai";
 
 import { MODEL } from "@/config";
@@ -13,15 +14,24 @@ import OpenAI from "openai";
 
 export const maxDuration = 60;
 
-export async function POST(req: Request) {
+// ---------------------------------------------------------
+// 🆕 Markdown Beautifier
+// ---------------------------------------------------------
+function beautifyMarkdown(text: string): string {
+  return text
+    .replace(/\. /g, ".\n\n")       // spacing after sentences
+    .replace(/###/g, "\n###")       // spacing before headings
+    .replace(/\n{3,}/g, "\n\n")     // normalize excessive breaks
+    .trim();
+}
 
+export async function POST(req: Request) {
   const contentType = req.headers.get("content-type") || "";
 
   // ======================================================
   // 📸 CASE 1 — IMAGE UPLOAD
   // ======================================================
   if (contentType.includes("multipart/form-data")) {
-
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
     const formData = await req.formData();
     const file = formData.get("image") as File;
@@ -31,7 +41,7 @@ export async function POST(req: Request) {
     const buffer = Buffer.from(await file.arrayBuffer());
     const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
-    // 1. Extract Ingredients
+    // 1️⃣ Extract Ingredients
     const extractRes = await client.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
@@ -45,43 +55,50 @@ export async function POST(req: Request) {
       ],
     });
 
-    const extracted = extractRes.choices[0].message.content || "No ingredients found.";
+    const extracted =
+      extractRes.choices?.[0]?.message?.content || "No ingredients found.";
 
-    // 2. Analyze (With Strict Formatting)
+    // 2️⃣ Safety Analysis
     const analyzeRes = await client.chat.completions.create({
       model: "gpt-4o",
       messages: [
         {
           role: "system",
-          content: `You are an expert FSSAI Food Safety Consultant. 
-          
+          content: `
+You are an expert FSSAI Food Safety Consultant.
+
 STYLE GUIDE:
 - Use ## for headers.
 - Use * for bullet points.
 - Keep it concise.
-- Start with a "Verdict" section.`
+- Start with a "Verdict" section.
+`,
         },
         {
           role: "user",
-          content: `Analyze these ingredients: ${extracted}`
-        }
+          content: `Analyze these ingredients: ${extracted}`,
+        },
       ],
     });
 
-    const analysis = analyzeRes.choices[0].message.content || "Could not analyze.";
+    const analysis =
+      beautifyMarkdown(
+        analyzeRes.choices?.[0]?.message?.content || "Could not analyze."
+      );
 
+    // PRETTY OUTPUT
     return Response.json({
       response: `## 📸 Extracted Ingredients
-${extracted}
+${beautifyMarkdown(extracted)}
 
 ---
 
-${analysis}`
+${analysis}`,
     });
   }
 
   // ======================================================
-  // 💬 CASE 2 — CHAT (Streaming)
+  // 💬 CASE 2 — TEXT CHAT (Streaming)
   // ======================================================
   const { messages }: { messages: UIMessage[] } = await req.json();
 
@@ -96,27 +113,48 @@ ${analysis}`
     const moderation = await isContentFlagged(textParts);
 
     if (moderation.flagged) {
-      // Simple text response for blocked content (Safe & reliable)
-      return new Response("Message blocked due to safety policies.", { status: 400 });
+      return new Response("Message blocked due to safety policies.", {
+        status: 400,
+      });
     }
   }
 
-  // Streaming with Force-Fix for Type Errors
+  // ======================================================
+  // 🤖 STREAMING CHAT RESPONSE
+  // ======================================================
   const result = streamText({
     model: MODEL,
+
     system: `${SYSTEM_PROMPT}
 
 STYLE GUIDE:
-- Format ALL responses in clean Markdown.
+- Format all responses in clean Markdown.
 - Use ## for main headers.
-- Use * for lists.
-- Be concise.
+- Use * for bullet points.
+- Keep sentences short.
+- Avoid thick paragraphs.
 `,
+
     messages: convertToModelMessages(messages),
     tools: { webSearch, vectorDatabaseSearch },
-    maxSteps: 5, 
+
+    // ✔ FIX: replace maxSteps with stopWhen
+    stopWhen: stepCountIs(5),
   });
 
-  // @ts-ignore
-  return (result as any).toDataStreamResponse();
+  // -----------------------------------------------------
+  // 🆕 Transform streaming chunks for beautification
+  // -----------------------------------------------------
+  const stream = result.toDataStream();
+
+  const transformed = stream.experimental_transform({
+    transform(chunk) {
+      if (chunk.type === "text-delta" && chunk.text) {
+        chunk.text = beautifyMarkdown(chunk.text);
+      }
+      return chunk;
+    }
+  });
+
+  return transformed.toResponse();
 }
