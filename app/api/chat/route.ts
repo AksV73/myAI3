@@ -15,6 +15,17 @@ import { vectorDatabaseSearch } from "./tools/search-vector-database";
 
 export const maxDuration = 30;
 
+// ---------------------------------------------------------
+// 🆕 ADD THIS — Markdown Beautifier
+// ---------------------------------------------------------
+function beautifyMarkdown(text: string): string {
+    return text
+        .replace(/\. /g, ".\n\n")      // spacing after sentences
+        .replace(/###/g, "\n###")      // spacing before headings
+        .replace(/\n{3,}/g, "\n\n")    // normalize extra newlines
+        .trim();
+}
+
 export async function POST(req: Request) {
 
     const contentType = req.headers.get("content-type") || "";
@@ -39,24 +50,13 @@ export async function POST(req: Request) {
         const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
         // ======================================================
-        // 🔍 1) Extract Ingredient List INTELLIGENTLY
+        // 🔍 1) Extract Ingredients
         // ======================================================
         const extractRes = await client.responses.create({
             model: "gpt-4.1-mini",
             input: `
 You are a food-label OCR expert.
-
-From the image below, extract the INGREDIENT LIST if it exists.
-
-Rules:
-- Return ONLY the ingredient list (comma or line separated).
-- Ignore nutrition tables, calories, barcode text, slogans.
-- If the label has "CONTAINS" or "MAY CONTAIN", ALSO extract them.
-- If no explicit "Ingredients:" header exists, detect ingredient-like text.
-- Remove non-food text.
-- Clean and normalize the output.
-
-If nothing resembles ingredients, return: "No ingredients found."
+Return ONLY the extracted ingredient list in clean format.
 
 <image>${dataUrl}</image>
 `
@@ -65,42 +65,33 @@ If nothing resembles ingredients, return: "No ingredients found."
         const extracted = extractRes.output_text || "No ingredients found.";
 
         // ======================================================
-        // 🧪 2) Analyze Using FSSAI Logic
+        // 🧪 2) FSSAI Safety Analysis
         // ======================================================
         const analyzeRes = await client.responses.create({
             model: "gpt-4.1-mini",
             input: `
 You are an Indian FSSAI Additive Analyzer.
 
-
-
 Given these extracted ingredients:
 
 ${extracted}
 
-Classify each into:
-- SAFE  
-- HARMFUL  
-- BANNED (FSSAI)  
-- KID-SENSITIVE  
-
-Return results in clear bullet points with emojis:
-🟢 Safe  
-🟡 Caution  
-🔴 Harmful  
-⛔ Banned  
-👶 Kid-sensitive  
+Return the analysis in:
+- Clean Markdown
+- Bullet points
+- Emojis for safety level
 `
         });
 
-        const analysis = analyzeRes.output_text || "Could not analyze ingredients.";
+        const analysis = beautifyMarkdown(analyzeRes.output_text || "Could not analyze ingredients.");
 
+        // 🆕 PRETTIFIED IMAGE OUTPUT
         return Response.json({
             response:
-`📸 **Extracted Ingredients:**  
-${extracted}
+`## 📸 Extracted Ingredients  
+${beautifyMarkdown(extracted)}
 
-🔍 **FSSAI Safety Analysis:**  
+## 🔍 FSSAI Safety Analysis  
 ${analysis}`
         });
     }
@@ -145,13 +136,30 @@ ${analysis}`
     // ======================================================
     const result = streamText({
         model: MODEL,
-        system: SYSTEM_PROMPT,
+
+        // 🆕 Improve formatting in AI behavior
+        system:
+`${SYSTEM_PROMPT}
+
+FORMAT ALL ANSWERS IN CLEAN MARKDOWN.
+Use:
+- Headings (##)
+- Bullet points
+- Short paragraphs
+- Bold important concepts
+Avoid long dense paragraphs.
+`,
+
         messages: convertToModelMessages(messages),
         tools: { webSearch, vectorDatabaseSearch },
         stopWhen: stepCountIs(10)
     });
 
+    // -----------------------------------------------------
+    // 🆕 Beautify the streamed result before sending
+    // -----------------------------------------------------
     return result.toUIMessageStreamResponse({
-        sendReasoning: true
+        sendReasoning: true,
+        transform: (text) => beautifyMarkdown(text)  // <— MAGIC LINE
     });
 }
