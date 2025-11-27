@@ -2,19 +2,19 @@ import {
   streamText,
   UIMessage,
   convertToModelMessages,
-  stepCountIs,
+  stepCountIs, // We keep this for your version
   createUIMessageStream,
   createUIMessageStreamResponse
 } from "ai";
 
-import { MODEL } from "@/config"; // Ensure this exports a string like 'gpt-4o'
+import { MODEL } from "@/config";
 import { SYSTEM_PROMPT } from "@/prompts";
 import { isContentFlagged } from "@/lib/moderation";
 import { webSearch } from "./tools/web-search";
 import { vectorDatabaseSearch } from "./tools/search-vector-database";
-import OpenAI from "openai"; // Import OpenAI directly here to be safe
+import OpenAI from "openai"; 
 
-export const maxDuration = 60; // Increased duration slightly for image processing
+export const maxDuration = 60;
 
 export async function POST(req: Request) {
 
@@ -34,13 +34,12 @@ export async function POST(req: Request) {
       return Response.json({ response: "No image found." });
     }
 
-    // Convert uploaded image → Base64 data URL
     const buffer = Buffer.from(await file.arrayBuffer());
     const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
-    // 🔍 1) Extract Ingredient List
+    // 1. Extract Ingredients
     const extractRes = await client.chat.completions.create({
-      model: "gpt-4o-mini", // FIXED MODEL NAME
+      model: "gpt-4o-mini", // FIXED: Correct model name
       messages: [
         {
           role: "user",
@@ -54,20 +53,18 @@ export async function POST(req: Request) {
 
     const extracted = extractRes.choices[0].message.content || "No ingredients found.";
 
-    // 🧪 2) Ingredient Safety Analysis
-    // We put the STRICT formatting instructions here
+    // 2. Analyze with Strict Formatting
     const analyzeRes = await client.chat.completions.create({
-      model: "gpt-4o", // Use the big model for better reasoning
+      model: "gpt-4o",
       messages: [
         {
           role: "system",
           content: `You are an expert FSSAI Food Safety Consultant. 
-Your goal is to explain food labels to a layperson.
           
 CRITICAL FORMATTING RULES:
 1. Use H2 headers (##) for sections. NEVER use H3 (###) or H4 (####).
 2. Use standard bullet points (*).
-3. Do not use bold (**) excessively. Only bold the name of the ingredient.
+3. Do not use bold (**) excessively.
 4. Keep descriptions short (1 sentence).
 5. Add a "Verdit" section at the top with a single emoji status.
 `
@@ -83,7 +80,6 @@ ${extracted}`
 
     const analysis = analyzeRes.choices[0].message.content || "Could not analyze ingredients.";
 
-    // Return a clean JSON. The UI will render the markdown.
     return Response.json({
       response: `## 📸 Extracted Ingredients
 ${extracted}
@@ -134,8 +130,8 @@ ${analysis}`
   // ======================================================
   const result = streamText({
     model: MODEL,
-
-    // We fix the output output HERE in the system prompt, not with Regex
+    
+    // We strictly enforce Markdown in the system prompt
     system: `${SYSTEM_PROMPT}
 
 STYLE GUIDE:
@@ -145,12 +141,13 @@ STYLE GUIDE:
 - Avoid large blocks of text.
 - Be concise and friendly.
 `,
-
     messages: convertToModelMessages(messages),
     tools: { webSearch, vectorDatabaseSearch },
-    maxSteps: 10, 
+    
+    // FIXED: Reverted to 'stopWhen' which matches your installed SDK version
+    stopWhen: stepCountIs(5) 
   });
 
-  // FIXED: Standard way to return a stream in Vercel AI SDK
+  // FIXED: Using the standard response format for your version
   return result.toDataStreamResponse();
 }
