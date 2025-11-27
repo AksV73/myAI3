@@ -1,51 +1,53 @@
-import { UIMessage, ToolCallPart, ToolResultPart } from "ai";
-import { Response } from "@/components/ai-elements/response";
-import { ReasoningPart } from "./reasoning-part";
-import { ToolCall, ToolResult } from "./tool-call";
+"use client";
 
-export function AssistantMessage({ message, status, isLastMessage, durations, onDurationChange }: { message: UIMessage; status?: string; isLastMessage?: boolean; durations?: Record<string, number>; onDurationChange?: (key: string, duration: number) => void }) {
-    return (
-        <div className="w-full">
-            <div className="text-sm flex flex-col gap-4">
-                {message.parts.map((part, i) => {
-                    const isStreaming = status === "streaming" && isLastMessage && i === message.parts.length - 1;
-                    const durationKey = `${message.id}-${i}`;
-                    const duration = durations?.[durationKey];
+interface AssistantMessageProps {
+  message: {
+    id: string;
+    role: string;
+    content: string;
+  };
+}
 
-                    if (part.type === "text") {
-                        return <Response key={`${message.id}-${i}`}>{part.text}</Response>;
-                    } else if (part.type === "reasoning") {
-                        return (
-                            <ReasoningPart
-                                key={`${message.id}-${i}`}
-                                part={part}
-                                isStreaming={isStreaming}
-                                duration={duration}
-                                onDurationChange={onDurationChange ? (d) => onDurationChange(durationKey, d) : undefined}
-                            />
-                        );
-                    } else if (
-                        part.type.startsWith("tool-") || part.type === "dynamic-tool"
-                    ) {
-                        if ('state' in part && part.state === "output-available") {
-                            return (
-                                <ToolResult
-                                    key={`${message.id}-${i}`}
-                                    part={part as unknown as ToolResultPart}
-                                />
-                            );
-                        } else {
-                            return (
-                                <ToolCall
-                                    key={`${message.id}-${i}`}
-                                    part={part as unknown as ToolCallPart}
-                                />
-                            );
-                        }
-                    }
-                    return null;
-                })}
-            </div>
-        </div>
-    )
+/**
+ * Lightweight Markdown → HTML converter
+ * NO imports, NO external packages, NO terminal required.
+ */
+function markdownToHtml(md: string): string {
+  if (!md) return "";
+
+  let html = md;
+
+  // --- Headings ---
+  html = html.replace(/^### (.*$)/gim, "<h3>$1</h3>");
+  html = html.replace(/^## (.*$)/gim, "<h2>$1</h2>");
+  html = html.replace(/^# (.*$)/gim, "<h1>$1</h1>");
+
+  // --- Bold + italic ---
+  html = html.replace(/\*\*\*(.*?)\*\*\*/gim, "<strong><em>$1</em></strong>");
+
+  // --- Bold ---
+  html = html.replace(/\*\*(.*?)\*\*/gim, "<strong>$1</strong>");
+
+  // --- Italic ---
+  html = html.replace(/\*(.*?)\*/gim, "<em>$1</em>");
+
+  // --- Bullet points ---
+  html = html.replace(/^\* (.*$)/gim, "<li>$1</li>");
+
+  // Wrap <li> inside <ul> group
+  html = html.replace(/(<li>[\s\S]*?<\/li>)/gim, "<ul>$1</ul>");
+
+  // --- Line breaks ---
+  html = html.replace(/\n/g, "<br>");
+
+  return html.trim();
+}
+
+export default function AssistantMessage({ message }: AssistantMessageProps) {
+  return (
+    <div
+      className="p-4 bg-gray-100 rounded-lg text-sm leading-relaxed whitespace-pre-wrap"
+      dangerouslySetInnerHTML={{ __html: markdownToHtml(message.content) }}
+    />
+  );
 }
