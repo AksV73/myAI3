@@ -1,172 +1,156 @@
 import {
-    streamText,
-    UIMessage,
-    convertToModelMessages,
-    stepCountIs,
-    createUIMessageStream,
-    createUIMessageStreamResponse
+  streamText,
+  UIMessage,
+  convertToModelMessages,
+  stepCountIs,
+  createUIMessageStream,
+  createUIMessageStreamResponse
 } from "ai";
 
-import { MODEL } from "@/config";
+import { MODEL } from "@/config"; // Ensure this exports a string like 'gpt-4o'
 import { SYSTEM_PROMPT } from "@/prompts";
 import { isContentFlagged } from "@/lib/moderation";
 import { webSearch } from "./tools/web-search";
 import { vectorDatabaseSearch } from "./tools/search-vector-database";
+import OpenAI from "openai"; // Import OpenAI directly here to be safe
 
-export const maxDuration = 30;
-
-// ---------------------------------------------------------
-// 🆕 Markdown Beautifier
-// ---------------------------------------------------------
-function beautifyMarkdown(text: string): string {
-    return text
-        .replace(/\. /g, ".\n\n")      // add spacing after sentences
-        .replace(/###/g, "\n###")      // add line breaks before headings
-        .replace(/\n{3,}/g, "\n\n")    // normalize excessive newlines
-        .trim();
-}
+export const maxDuration = 60; // Increased duration slightly for image processing
 
 export async function POST(req: Request) {
 
-    const contentType = req.headers.get("content-type") || "";
+  const contentType = req.headers.get("content-type") || "";
 
-    // ======================================================
-    // 📸 CASE 1 — IMAGE UPLOAD
-    // ======================================================
-    if (contentType.includes("multipart/form-data")) {
+  // ======================================================
+  // 📸 CASE 1 — IMAGE UPLOAD (Single Response)
+  // ======================================================
+  if (contentType.includes("multipart/form-data")) {
 
-        const OpenAI = (await import("openai")).default;
-        const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-        const formData = await req.formData();
-        const file = formData.get("image") as File;
+    const formData = await req.formData();
+    const file = formData.get("image") as File;
 
-        if (!file) {
-            return Response.json({ response: "No image found." });
-        }
+    if (!file) {
+      return Response.json({ response: "No image found." });
+    }
 
-        // Convert uploaded image → Base64 data URL
-        const buffer = Buffer.from(await file.arrayBuffer());
-        const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
+    // Convert uploaded image → Base64 data URL
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
-        // ======================================================
-        // 🔍 1) Extract Ingredient List
-        // ======================================================
-        const extractRes = await client.responses.create({
-            model: "gpt-4.1-mini",
-            input: `
-You are a food-label OCR expert.
+    // 🔍 1) Extract Ingredient List
+    const extractRes = await client.chat.completions.create({
+      model: "gpt-4o-mini", // FIXED MODEL NAME
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Extract ONLY the ingredient list from this image. Do not add any conversational filler." },
+            { type: "image_url", image_url: { url: dataUrl } },
+          ],
+        },
+      ],
+    });
 
-Extract ONLY the ingredient list from this image:
+    const extracted = extractRes.choices[0].message.content || "No ingredients found.";
 
-<image>${dataUrl}</image>
+    // 🧪 2) Ingredient Safety Analysis
+    // We put the STRICT formatting instructions here
+    const analyzeRes = await client.chat.completions.create({
+      model: "gpt-4o", // Use the big model for better reasoning
+      messages: [
+        {
+          role: "system",
+          content: `You are an expert FSSAI Food Safety Consultant. 
+Your goal is to explain food labels to a layperson.
+          
+CRITICAL FORMATTING RULES:
+1. Use H2 headers (##) for sections. NEVER use H3 (###) or H4 (####).
+2. Use standard bullet points (*).
+3. Do not use bold (**) excessively. Only bold the name of the ingredient.
+4. Keep descriptions short (1 sentence).
+5. Add a "Verdit" section at the top with a single emoji status.
 `
-        });
+        },
+        {
+          role: "user",
+          content: `Analyze these ingredients for safety, allergens, and child suitability:
+          
+${extracted}`
+        }
+      ],
+    });
 
-        const extracted = extractRes.output_text || "No ingredients found.";
+    const analysis = analyzeRes.choices[0].message.content || "Could not analyze ingredients.";
 
-        // ======================================================
-        // 🧪 2) Ingredient Safety Analysis
-        // ======================================================
-        const analyzeRes = await client.responses.create({
-            model: "gpt-4.1-mini",
-            input: `
-You are an Indian FSSAI Additive Analyzer.
-
-Analyze these ingredients:
-
+    // Return a clean JSON. The UI will render the markdown.
+    return Response.json({
+      response: `## 📸 Extracted Ingredients
 ${extracted}
 
-Return results in:
-- Clean Markdown
-- Bullet points
-- Emojis (🟢🟡🔴⛔👶)
-`
-        });
+---
 
-        const analysis = beautifyMarkdown(analyzeRes.output_text || "Could not analyze ingredients.");
-
-        return Response.json({
-            response:
-`## 📸 Extracted Ingredients  
-${beautifyMarkdown(extracted)}
-
-## 🔍 FSSAI Safety Analysis  
 ${analysis}`
-        });
-    }
+    });
+  }
 
-    // ======================================================
-    // 💬 CASE 2 — STANDARD CHAT MODE
-    // ======================================================
-    const { messages }: { messages: UIMessage[] } = await req.json();
+  // ======================================================
+  // 💬 CASE 2 — STANDARD CHAT MODE (Streaming)
+  // ======================================================
+  const { messages }: { messages: UIMessage[] } = await req.json();
 
-    const latest = messages.filter(m => m.role === "user").pop();
+  const latest = messages.filter(m => m.role === "user").pop();
 
-    if (latest) {
-        const textParts = latest.parts
-            .filter(p => p.type === "text")
-            .map(p => ("text" in p ? p.text : ""))
-            .join("");
+  if (latest) {
+    const textParts = latest.parts
+      .filter(p => p.type === "text")
+      .map(p => ("text" in p ? p.text : ""))
+      .join("");
 
-        const moderation = await isContentFlagged(textParts);
+    const moderation = await isContentFlagged(textParts);
 
-        if (moderation.flagged) {
-            const stream = createUIMessageStream({
-                execute({ writer }) {
-                    const id = "blocked";
-                    writer.write({ type: "start" });
-                    writer.write({ type: "text-start", id });
-                    writer.write({
-                        type: "text-delta",
-                        id,
-                        delta: moderation.denialMessage || "Message blocked."
-                    });
-                    writer.write({ type: "text-end", id });
-                    writer.write({ type: "finish" });
-                }
-            });
-
-            return createUIMessageStreamResponse({ stream });
+    if (moderation.flagged) {
+      const stream = createUIMessageStream({
+        execute({ writer }) {
+          const id = "blocked";
+          writer.write({ type: "start" });
+          writer.write({ type: "text-start", id });
+          writer.write({
+            type: "text-delta",
+            id,
+            delta: moderation.denialMessage || "Message blocked."
+          });
+          writer.write({ type: "text-end", id });
+          writer.write({ type: "finish" });
         }
+      });
+
+      return createUIMessageStreamResponse({ stream });
     }
+  }
 
-    // ======================================================
-    // 🤖 Streaming Chat with Markdown Formatting
-    // ======================================================
-    const result = streamText({
-        model: MODEL,
+  // ======================================================
+  // 🤖 Streaming Chat
+  // ======================================================
+  const result = streamText({
+    model: MODEL,
 
-        system:
-`${SYSTEM_PROMPT}
+    // We fix the output output HERE in the system prompt, not with Regex
+    system: `${SYSTEM_PROMPT}
 
-FORMAT ALL ANSWERS IN CLEAN MARKDOWN.
-Use:
-- Headings (##)
-- Bullet points
-- Short paragraphs
-- Bold important concepts
-No long dense paragraphs.
+STYLE GUIDE:
+- Format ALL responses in clean Markdown.
+- Use ## for main headers.
+- Use * for lists.
+- Avoid large blocks of text.
+- Be concise and friendly.
 `,
 
-        messages: convertToModelMessages(messages),
-        tools: { webSearch, vectorDatabaseSearch },
-        stopWhen: stepCountIs(10)
-    });
+    messages: convertToModelMessages(messages),
+    tools: { webSearch, vectorDatabaseSearch },
+    maxSteps: 10, 
+  });
 
-    // -----------------------------------------------------
-    // 🆕 Transform stream output to beautify markdown
-    // -----------------------------------------------------
-    const stream = result.toDataStream();
-
-    const transformed = stream.experimental_transform({
-        transform(chunk) {
-            if (chunk.type === "text-delta" && chunk.text) {
-                chunk.text = beautifyMarkdown(chunk.text);
-            }
-            return chunk;
-        }
-    });
-
-    return transformed.toResponse();
+  // FIXED: Standard way to return a stream in Vercel AI SDK
+  return result.toDataStreamResponse();
 }
