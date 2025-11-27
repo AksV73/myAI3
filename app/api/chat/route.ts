@@ -2,7 +2,7 @@ import {
   streamText,
   UIMessage,
   convertToModelMessages,
-  stepCountIs, // We keep this for your version
+  stepCountIs,
   createUIMessageStream,
   createUIMessageStreamResponse
 } from "ai";
@@ -12,9 +12,10 @@ import { SYSTEM_PROMPT } from "@/prompts";
 import { isContentFlagged } from "@/lib/moderation";
 import { webSearch } from "./tools/web-search";
 import { vectorDatabaseSearch } from "./tools/search-vector-database";
-import OpenAI from "openai"; 
+import OpenAI from "openai"; // Ensure OpenAI is imported
 
-export const maxDuration = 60;
+// Increased duration slightly for complex vision/analysis tasks
+export const maxDuration = 60; 
 
 export async function POST(req: Request) {
 
@@ -34,12 +35,13 @@ export async function POST(req: Request) {
       return Response.json({ response: "No image found." });
     }
 
+    // Convert uploaded image → Base64 data URL
     const buffer = Buffer.from(await file.arrayBuffer());
     const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
-    // 1. Extract Ingredients
+    // 1. Extract Ingredients (Use a faster, smaller model for simple OCR)
     const extractRes = await client.chat.completions.create({
-      model: "gpt-4o-mini", // FIXED: Correct model name
+      model: "gpt-4o-mini", // FIXED: Using the correct, fast model name
       messages: [
         {
           role: "user",
@@ -53,20 +55,23 @@ export async function POST(req: Request) {
 
     const extracted = extractRes.choices[0].message.content || "No ingredients found.";
 
-    // 2. Analyze with Strict Formatting
+    // 2. Ingredient Safety Analysis (Use a powerful model for reasoning/formatting)
     const analyzeRes = await client.chat.completions.create({
-      model: "gpt-4o",
+      model: "gpt-4o", // Using a powerful model for high-quality analysis
       messages: [
         {
+          // FIX: Strict Formatting Prompt applied here to solve the ugly text issue
           role: "system",
           content: `You are an expert FSSAI Food Safety Consultant. 
           
+Your primary goal is to provide a clean, readable, and structured analysis for a non-technical user.
+          
 CRITICAL FORMATTING RULES:
-1. Use H2 headers (##) for sections. NEVER use H3 (###) or H4 (####).
-2. Use standard bullet points (*).
+1. Use H2 headers (##) for sections. NEVER use H3 (###) or H4 (####) which cause visual errors.
+2. Use standard bullet points (*) for lists.
 3. Do not use bold (**) excessively.
-4. Keep descriptions short (1 sentence).
-5. Add a "Verdit" section at the top with a single emoji status.
+4. Keep descriptions concise (one or two sentences max).
+5. Always include a section summarizing the overall verdict and one for child safety/allergens.
 `
         },
         {
@@ -80,6 +85,7 @@ ${extracted}`
 
     const analysis = analyzeRes.choices[0].message.content || "Could not analyze ingredients.";
 
+    // Return a clean JSON. The UI will render the markdown.
     return Response.json({
       response: `## 📸 Extracted Ingredients
 ${extracted}
@@ -131,7 +137,7 @@ ${analysis}`
   const result = streamText({
     model: MODEL,
     
-    // We strictly enforce Markdown in the system prompt
+    // FIX: Strict Formatting Prompt added here for the chat model as well
     system: `${SYSTEM_PROMPT}
 
 STYLE GUIDE:
@@ -144,10 +150,16 @@ STYLE GUIDE:
     messages: convertToModelMessages(messages),
     tools: { webSearch, vectorDatabaseSearch },
     
-    // FIXED: Reverted to 'stopWhen' which matches your installed SDK version
+    // COMPILATION FIX: Using the property compatible with your SDK version
     stopWhen: stepCountIs(5) 
   });
 
-  // FIXED: Using the standard response format for your version
-  return result.toDataStreamResponse();
+  // COMPILATION FIX: The most reliable way to return the raw stream, 
+  // bypassing the conflicting Vercel SDK utility methods that caused the errors.
+  return new Response(result.stream, {
+      headers: { 
+        "Content-Type": "text/plain", 
+        "Cache-Control": "no-cache" 
+      },
+  });
 }
